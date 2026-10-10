@@ -111,3 +111,22 @@ idle screen sends nothing. "New" is relative to how busy the screen normally is.
 | `POST /api/ask {q}` | Nemotron answer with `[#id]` citations |
 | `POST /api/draft {ids, kind}` | kind = email / message / todo / notes |
 | `GET /api/browse`, `/api/timeline`, `/api/stats`, `/api/health`, `/img/{id}` | |
+
+## Model client defaults
+
+The laptop keeps screenshots and the SQLite/FTS5 plus NumPy search index in
+`DATA_DIR` (default `~/.dockt/data`). It calls OpenAI-compatible model services
+through these settings:
+
+```text
+VLM_URL=http://localhost:11434/v1       VLM_MODEL=gemma4:26b
+EMBED_URL=$VLM_URL                      EMBED_MODEL=nomic-embed-text
+LLM_URL=$VLM_URL                        LLM_MODEL=nemotron3:33b
+STT_URL=http://localhost:8001/v1        STT_MODEL=small
+```
+
+`EMBED_URL` and `LLM_URL` default to `VLM_URL`. For the local mock, point
+`VLM_URL` at `http://127.0.0.1:9000/v1`; set `STT_URL` to the same URL when
+testing transcription. Lane 3's message/tool/stream interface is in
+`server/models.py`; `python tools/chat_smoke.py` exercises it against the mock
+or the configured chat model.
