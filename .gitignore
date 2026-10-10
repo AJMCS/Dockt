@@ -7,3 +7,4 @@ __pycache__/
 dockt-patched/server/data/
 data/
 *.log
+dockt-patched/gx10.txt
