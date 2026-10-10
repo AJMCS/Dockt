@@ -1,5 +1,7 @@
 # Dockt — your workday, remembered. 100% local.
 
+> **Oct 10 update:** the architecture changed. The whole app now runs on each laptop (`python server/app.py` on 127.0.0.1:8000) and the GX10 only serves models through Ollama. `TEAM.md` and `team/ORCHESTRATION.md` are the source of truth; the sections below still describe the older "app on the GX10" setup and are kept for the commands.
+
 Private screen memory for work, running on the ASUS GX10.
 
 ```
