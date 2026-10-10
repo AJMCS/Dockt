@@ -43,6 +43,9 @@
   ::selection { background: var(--accent-soft); }
   body { margin: 0; display: flex; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
   button, select, textarea { font: inherit; color: inherit; }
+  /* desktop-app feel: chrome isn't selectable text; content (answers, drafts, screen text) still is */
+  #sidebar, .topbar, button, h3, .meta, .kind, .cite, .tlaxis, #sourcesTitle { -webkit-user-select: none; user-select: none; }
+  html { overscroll-behavior: none; }
 
   /* sidebar (Claude-style): logo, new chat, recents, theme */
   #sidebar { width: 264px; flex: none; position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 6px;
