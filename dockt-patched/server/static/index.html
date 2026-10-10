@@ -21,8 +21,6 @@
   .logo span { color: var(--accent); }
   .local { font-size: 12px; border: 1px solid var(--accent); color: var(--accent2);
            padding: 3px 10px; border-radius: 99px; font-family: var(--mono); }
-  .stats { margin-left: auto; display: flex; gap: 18px; font-family: var(--mono); font-size: 12px; color: var(--dim); }
-  .stats b { color: var(--text); font-weight: 600; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 4px; }
   .dot.ok { background: var(--accent); }
   main { max-width: 1280px; margin: 0 auto; padding: 24px; }
@@ -95,14 +93,13 @@
   .kind.deadline { color: var(--warn); border-color: var(--warn); }
   .kind.request { color: #60a5fa; border-color: #60a5fa; }
   @media (max-width: 900px) { .chatwrap { grid-template-columns: 1fr; } }
-  @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal img { border-radius: 12px 12px 0 0; } .stats { display: none; } }
+  @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal img { border-radius: 12px 12px 0 0; } }
 </style>
 </head>
 <body>
 <header>
   <div class="logo">Dockt<span>.</span></div>
   <div class="local" id="localBadge">● 100% on-device</div>
-  <div class="stats" id="stats"></div>
 </header>
 <main>
   <div class="chatwrap">
@@ -122,7 +119,7 @@
   </div>
 
   <div class="todayhead">
-    <h3>Things you promised <span class="meta" id="promHint">· pulled from your screens as you work</span></h3>
+    <h3>Things you promised <span class="meta" id="promHint"></span></h3>
     <div class="actions">
       <button class="btn" data-standup="standup">Write my standup</button>
       <button class="btn" data-standup="timesheet">Draft timesheet</button>
@@ -164,28 +161,13 @@ async function api(path, opts) {
   return r.json();
 }
 
-// ---------- header stats ----------
-async function refreshStats() {
+// ---------- device list (from /api/stats) ----------
+async function refreshDevices() {
   try {
     const s = await api("/api/stats");
-    $("#stats").innerHTML =
-      (s.checks ? `<span title="screen checks on laptops → frames kept; the rest never left the laptop">` +
-        `<b>${s.checks.toLocaleString()}</b> checks → <b>${s.kept.toLocaleString()}</b> kept · ` +
-        `<b>${s.filtered_pct}%</b> filtered on-device</span>` : "") +
-      `<span><b>${s.total.toLocaleString()}</b> captures</span>` +
-      `<span><b>${s.queued}</b> queued</span>` +
-      `<span><b>${s.indexed_per_min}</b>/min indexed</span>` +
-      `<span><b>${s.devices.length}</b> devices</span>` + healthHtml;
     const cur = $("#dev").value;
     $("#dev").innerHTML = `<option value="">All devices</option>` +
       s.devices.map(d => `<option ${d === cur ? "selected" : ""}>${esc(d)}</option>`).join("");
-  } catch (e) { $("#stats").textContent = "server unreachable"; }
-}
-let healthHtml = "";
-async function refreshHealth() {
-  try {
-    const h = await api("/api/health");
-    healthHtml = Object.entries(h.models).map(([k, ok]) => `<span><i class="dot ${ok ? "ok" : ""}"></i>${k}</span>`).join("");
   } catch {}
 }
 
@@ -425,7 +407,7 @@ async function refreshPromises() {
       </li>`).join("");
     r.items.forEach(c => seenPromises.add(c.id));
     promisesLoaded = true;
-    $("#promHint").textContent = `· ${r.items.filter(c => !c.done).length} open · pulled from your screens as you work`;
+    $("#promHint").textContent = `· ${r.items.filter(c => !c.done).length} open`;
   } catch {}
 }
 $("#promises").addEventListener("click", async e => {
@@ -488,10 +470,9 @@ window.addEventListener("hashchange", route);
 route();
 
 // ---------- loop ----------
-refreshHealth().then(refreshStats); refreshTimeline(); showLatest(); refreshPromises();
-setInterval(refreshStats, 3000);
+refreshDevices(); refreshTimeline(); showLatest(); refreshPromises();
+setInterval(refreshDevices, 15000);
 setInterval(refreshPromises, 4000);
-setInterval(refreshHealth, 10000);
 setInterval(refreshTimeline, 15000);
 setInterval(showLatest, 5000);
 </script>
