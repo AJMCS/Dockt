@@ -14,7 +14,7 @@
     --text: #1F1E1D; --muted: #6B6A65; --hover: rgba(31, 30, 29, .05); --active: rgba(31, 30, 29, .08); --img-bg: #EDEBE3;
     --accent: #76B900; --accent-hover: #6AA600; --on-accent: #1F1E1D;   /* fills only */
     --accent-text: #4D7C0F; --accent-soft: rgba(118, 185, 0, .14);     /* text/links on cream */
-    --warn-text: #B45309; --info-text: #1D4ED8;
+    --warn-text: #B45309; --info-text: #1D4ED8; --bad-text: #B91C1C;
     --shadow: 0 1px 2px rgba(31, 30, 29, .04), 0 6px 20px rgba(31, 30, 29, .07); --backdrop: rgba(31, 30, 29, .42);
     --sun: none; --moon: inline; color-scheme: light;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
@@ -26,7 +26,7 @@
       --bg: #262624; --surface: #30302E; --surface2: #1F1E1D; --recess: #1F1E1D; --line: #3E3E3A;
       --text: #F5F4EE; --muted: #A3A29B; --hover: rgba(245, 244, 238, .06); --active: rgba(245, 244, 238, .09); --img-bg: #1F1E1D;
       --accent-text: #A3E635; --accent-soft: rgba(163, 230, 53, .13);
-      --warn-text: #F2B35B; --info-text: #8AB8F5;
+      --warn-text: #F2B35B; --info-text: #8AB8F5; --bad-text: #F28B82;
       --shadow: 0 1px 2px rgba(0, 0, 0, .25), 0 8px 24px rgba(0, 0, 0, .25); --backdrop: rgba(20, 20, 19, .62);
       --sun: inline; --moon: none; color-scheme: dark;
     }
@@ -35,7 +35,7 @@
       --bg: #262624; --surface: #30302E; --surface2: #1F1E1D; --recess: #1F1E1D; --line: #3E3E3A;
       --text: #F5F4EE; --muted: #A3A29B; --hover: rgba(245, 244, 238, .06); --active: rgba(245, 244, 238, .09); --img-bg: #1F1E1D;
       --accent-text: #A3E635; --accent-soft: rgba(163, 230, 53, .13);
-      --warn-text: #F2B35B; --info-text: #8AB8F5;
+      --warn-text: #F2B35B; --info-text: #8AB8F5; --bad-text: #F28B82;
       --shadow: 0 1px 2px rgba(0, 0, 0, .25), 0 8px 24px rgba(0, 0, 0, .25); --backdrop: rgba(20, 20, 19, .62);
       --sun: inline; --moon: none; color-scheme: dark;
   }
@@ -51,6 +51,7 @@
   .logo { font-weight: 650; font-size: 20px; letter-spacing: -.02em; }
   .logo span { color: var(--accent); }
   .local { font-size: 12px; font-weight: 500; color: var(--accent-text); border: 1px solid var(--accent); padding: 2px 10px; border-radius: 99px; white-space: nowrap; }
+  .local.down { color: var(--bad-text); border-color: var(--bad-text); }
   .sb-new { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border: 0; border-radius: 10px; background: transparent;
             font-size: 14px; font-weight: 500; cursor: pointer; text-align: left; transition: background .15s; }
   .sb-new:hover { background: var(--hover); }
@@ -126,7 +127,7 @@
 
   /* sources + cards */
   #sourcesPane h3 { margin-top: 8px; }
-  #sources { display: flex; flex-direction: column; gap: 8px; max-height: min(380px, calc(100vh - 160px)); overflow-y: auto; padding: 2px; }
+  #sources { position: relative; display: flex; flex-direction: column; gap: 8px; max-height: min(380px, calc(100vh - 160px)); overflow-y: auto; padding: 2px; }
   /* compact source rows: thumbnail left, one-line meta, two-line summary */
   #sources .card { flex: none; display: grid; grid-template-columns: 88px minmax(0, 1fr); border-radius: 12px; }
   #sources .card img { width: 88px; height: 100%; min-height: 70px; aspect-ratio: auto; border-bottom: 0; border-right: 1px solid var(--line); }
@@ -293,6 +294,17 @@ async function api(path, opts) {
   return r.json();
 }
 
+// ---------- on-device badge: green while this laptop can reach the GX10 models ----------
+async function refreshHealth() {
+  let label = "● 100% on-device", tip = "Screens and index stay on this laptop; models run on the GX10 in the room.", down = false;
+  try {
+    const h = await api("/api/health");
+    const bad = Object.entries(h.models).filter(([, ok]) => !ok).map(([k]) => k);
+    if (bad.length) { down = true; label = "● GX10 unreachable"; tip = "Can't reach the GX10 models: " + bad.join(", "); }
+  } catch { down = true; label = "● Dockt service offline"; tip = "The local Dockt service isn't responding."; }
+  document.querySelectorAll(".local").forEach(b => { b.textContent = label; b.title = tip; b.classList.toggle("down", down); });
+}
+
 // ---------- device list (from /api/stats) ----------
 async function refreshDevices() {
   try {
@@ -443,7 +455,8 @@ async function sendChat(q) {
   busy = $("#go").disabled = true;
   try {
     const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
-                          body: JSON.stringify({messages: messages.map(({role, content}) => ({role, content})), stream: true})});
+                          body: JSON.stringify({messages: messages.map(({role, content}) => ({role, content})), stream: true,
+                                               device: $("#dev").value || null})});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
@@ -593,7 +606,7 @@ document.addEventListener("click", async e => {
   window.scrollTo({top: 0, behavior: "smooth"});
   bubble("user", esc(ask));
   const box = bubble("bot draft", `<span class="hint"><span class="spin"></span> Reading today's activity log on-device…</span>`).querySelector(".text");
-  busy = true;
+  busy = $("#go").disabled = true;
   try {
     const r = await api(`/api/standup?kind=${b.dataset.standup}${devParam()}`);
     box.innerHTML = md(r.text) + `<div class="actions"><button class="btn copy">Copy</button>` +
@@ -603,7 +616,7 @@ document.addEventListener("click", async e => {
     saveChat();
   } catch {
     box.innerHTML = `<span class="hint">Couldn't read today's activity just now. Try again in a moment.</span>`;
-  } finally { busy = false; scrollThread(); }
+  } finally { busy = $("#go").disabled = false; scrollThread(); }
 });
 
 // ---------- modal ----------
@@ -649,12 +662,13 @@ $("#thread").addEventListener("mouseover", e => {
   const c = e.target.closest(".cite");
   document.querySelectorAll("#sources .card.hl").forEach(x => x.classList.remove("hl"));
   const card = c && $(`#sources .card[data-id="${c.dataset.id}"]`);
-  if (card) { card.classList.add("hl"); card.scrollIntoView({block: "nearest", behavior: "smooth"}); }
+  if (card) { card.classList.add("hl"); $("#sources").scrollTo({top: card.offsetTop - 2, behavior: "smooth"}); }
 });
 
 // ---------- loop ----------
-refreshDevices(); refreshTimeline(); refreshPromises();
+refreshHealth(); refreshDevices(); refreshTimeline(); refreshPromises();
 setInterval(refreshDevices, 15000);
+setInterval(refreshHealth, 10000);
 setInterval(refreshPromises, 4000);
 setInterval(refreshTimeline, 15000);
 </script>
