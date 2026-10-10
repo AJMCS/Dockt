@@ -84,7 +84,7 @@ The quick-chat popup needs four of these: composer, answer text, citation chip a
 - **Citation chip.** Every `[#9]`, `#9` or `[9]` in an answer becomes `#9`: semibold 13px sans, `--accent-soft` background, `--accent-text` color, 6px radius. On hover it turns solid green with dark text. Only create a chip if that id is in the answer's `sources`. Otherwise leave the text alone, because "invoice #4471" is not a capture.
 - **Loader.** No spinners. A pulsing 8px green dot followed by a muted hint, e.g. "Searching your screens…". Show the `status` text from `/api/chat` here until the first token arrives.
 - **Buttons.** Ghost style: transparent, 1px `--line` border, 10px radius, `--hover` background on hover. Icon-only buttons drop the border.
-- **Source card.** A thumbnail (16:10, cropped from the top) above `#id · time · device` metadata, then app — title, then a 3-line serif summary. A cited card gets a green border.
+- **Source card.** A compact row, 12px radius: an 88px-wide thumbnail (cropped from the top) on the left; on the right `#id · time · device`, then app — title (one muted 11.5px line each), then a 2-line serif summary. A cited card gets a green border.
 - **Kind pills** (promises list): `promise` is muted, `deadline` is `--warn-text`, `request` is `--info-text`. 11px, outlined, fully rounded.
 - **"100% on-device" badge.** 12px green text in an outlined green pill, with a ● dot.
 - **Motion.** 0.15s transitions on hover and color only. One exception: a newly found promise row flashes `--accent-soft` for 1.2s.
