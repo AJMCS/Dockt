@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dockt</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #13161b; --panel2: #1a1e25; --line: #262b34;
+    --text: #e8eaee; --dim: #8b93a1; --accent: #76b900; --accent2: #a3e635;
+    --warn: #f59e0b; --bad: #ef4444; --chip: #1f2a14;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  .logo { font-weight: 700; font-size: 20px; letter-spacing: -.02em; }
+  .logo span { color: var(--accent); }
+  .local { font-size: 12px; border: 1px solid var(--accent); color: var(--accent2);
+           padding: 3px 10px; border-radius: 99px; font-family: var(--mono); }
+  .stats { margin-left: auto; display: flex; gap: 18px; font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .stats b { color: var(--text); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 4px; }
+  .dot.ok { background: var(--accent); }
+  main { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  .searchrow { display: flex; gap: 10px; }
+  .mode { display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .mode button { background: none; border: 0; color: var(--dim); padding: 0 16px; font: inherit; cursor: pointer; }
+  .mode button.on { background: var(--panel2); color: var(--text); }
+  #q { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--text);
+       font: inherit; font-size: 17px; padding: 14px 16px; outline: none; }
+  #q:focus { border-color: var(--accent); }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; font: inherit; }
+  .go { background: var(--accent); color: #0b0d10; border: 0; border-radius: 10px; padding: 0 22px; font-weight: 600; font: inherit; cursor: pointer; }
+  #answer { display: none; margin-top: 18px; background: var(--panel); border: 1px solid var(--line);
+            border-left: 3px solid var(--accent); border-radius: 10px; padding: 16px 18px; }
+  #answer .text { white-space: pre-wrap; }
+  .cite { display: inline-block; background: var(--chip); color: var(--accent2); border-radius: 6px; padding: 0 6px;
+          font-family: var(--mono); font-size: 12px; cursor: pointer; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+  .btn { background: var(--panel2); border: 1px solid var(--line); color: var(--text); border-radius: 8px;
+         padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .meta { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+  h3 { margin: 28px 0 10px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); font-weight: 600; }
+  #timeline { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; }
+  .tlrow { display: flex; align-items: flex-end; gap: 2px; height: 46px; margin: 4px 0; }
+  .tlrow .lbl { width: 110px; flex: none; font-size: 12px; color: var(--dim); align-self: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar { width: 10px; flex: none; background: var(--accent); opacity: .55; border-radius: 2px 2px 0 0; cursor: pointer; min-height: 2px; }
+  .bar:hover, .bar.sel { opacity: 1; }
+  .gap { width: 10px; flex: none; }
+  .tlaxis { display: flex; gap: 2px; margin-left: 110px; font-size: 10px; color: var(--dim); font-family: var(--mono); }
+  .tlaxis span { width: 10px; flex: none; overflow: visible; white-space: nowrap; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; transition: border-color .15s; }
+  .card:hover { border-color: var(--accent); }
+  .card.cited { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .card img { width: 100%; aspect-ratio: 16/10; object-fit: cover; object-position: top; display: block; background: #000; }
+  .card .body { padding: 10px 12px; }
+  .card .sum { font-size: 13px; color: #c9ced6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; }
+  .pending { color: var(--warn); }
+  .empty { color: var(--dim); padding: 30px; text-align: center; }
+  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75); z-index: 10; padding: 30px; overflow-y: auto; }
+  #modal .box { max-width: 1200px; margin: 0 auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; display: grid; grid-template-columns: 1.6fr 1fr; }
+  #modal img { width: 100%; border-radius: 12px 0 0 12px; display: block; }
+  #modal .side { padding: 18px; max-height: 85vh; overflow-y: auto; }
+  #modal pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12px; color: #c9ced6; background: var(--bg); padding: 10px; border-radius: 8px; max-height: 220px; overflow-y: auto; }
+  #draft { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 12px; margin-top: 10px; display: none; font-size: 14px; }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: s 1s linear infinite; vertical-align: -2px; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  /* things you promised + standup */
+  .todayhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .todayhead h3 { margin: 28px 0 10px; flex: 1; }
+  .todayhead .actions { margin: 18px 0 0; }
+  #promises { list-style: none; margin: 0; padding: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #promises li { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  #promises li:last-child { border-bottom: 0; }
+  #promises li.done .ptext { text-decoration: line-through; color: var(--dim); }
+  #promises li.new { animation: pop .9s ease-out; }
+  @keyframes pop { 0% { background: var(--chip); } 100% { background: transparent; } }
+  #promises input { margin-top: 5px; accent-color: var(--accent); }
+  .ptext { flex: 1; }
+  .kind { font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; margin-top: 3px; }
+  .kind.deadline { color: var(--warn); border-color: var(--warn); }
+  .kind.request { color: #60a5fa; border-color: #60a5fa; }
+  #standupBox { display: none; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--accent); border-radius: 10px; padding: 14px 16px; margin-top: 12px; font-size: 14px; }
+  @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal img { border-radius: 12px 12px 0 0; } .stats { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">Dockt<span>.</span></div>
+  <div class="local" id="localBadge">● 100% on-device</div>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <div class="searchrow">
+    <div class="mode"><button id="mAsk" class="on">Ask</button><button id="mSearch">Search</button></div>
+    <input id="q" placeholder="What was the restaurant Sam mentioned on Slack?" autofocus>
+    <select id="dev"><option value="">All devices</option></select>
+    <button class="go" id="go">Go</button>
+  </div>
+
+  <div id="answer">
+    <div class="text" id="answerText"></div>
+    <div class="actions" id="answerActions"></div>
+  </div>
+
+  <div class="todayhead">
+    <h3>Things you promised <span class="meta" id="promHint">· pulled from your screens as you work</span></h3>
+    <div class="actions">
+      <button class="btn" data-standup="standup">Write my standup</button>
+      <button class="btn" data-standup="timesheet">Draft timesheet</button>
+    </div>
+  </div>
+  <ul id="promises"><li class="empty">Nothing found yet — it shows up here within a minute of being on screen.</li></ul>
+  <div id="standupBox"></div>
+
+  <h3>Timeline <span class="meta" id="tlhint">· click a bar to jump there</span></h3>
+  <div id="timeline"></div>
+
+  <h3 id="gridTitle">Latest captures</h3>
+  <div id="grid"></div>
+</main>
+
+<div id="modal"><div class="box">
+  <img id="mImg" alt="">
+  <div class="side">
+    <div class="meta" id="mMeta"></div>
+    <h3 style="margin-top:14px">What's on screen</h3>
+    <div id="mSum"></div>
+    <h3>Screen text</h3>
+    <pre id="mOcr"></pre>
+    <h3>Act on this</h3>
+    <div class="actions" id="mActions"></div>
+    <div id="draft"></div>
+  </div>
+</div></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt = ts => new Date(ts * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"});
+let mode = "ask", live = true, lastSources = [];
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// ---------- header stats ----------
+async function refreshStats() {
+  try {
+    const s = await api("/api/stats");
+    $("#stats").innerHTML =
+      (s.checks ? `<span title="screen checks on laptops → frames kept; the rest never left the laptop">` +
+        `<b>${s.checks.toLocaleString()}</b> checks → <b>${s.kept.toLocaleString()}</b> kept · ` +
+        `<b>${s.filtered_pct}%</b> filtered on-device</span>` : "") +
+      `<span><b>${s.total.toLocaleString()}</b> captures</span>` +
+      `<span><b>${s.queued}</b> queued</span>` +
+      `<span><b>${s.indexed_per_min}</b>/min indexed</span>` +
+      `<span><b>${s.devices.length}</b> devices</span>` + healthHtml;
+    const cur = $("#dev").value;
+    $("#dev").innerHTML = `<option value="">All devices</option>` +
+      s.devices.map(d => `<option ${d === cur ? "selected" : ""}>${esc(d)}</option>`).join("");
+  } catch (e) { $("#stats").textContent = "server unreachable"; }
+}
+let healthHtml = "";
+async function refreshHealth() {
+  try {
+    const h = await api("/api/health");
+    healthHtml = Object.entries(h.models).map(([k, ok]) => `<span><i class="dot ${ok ? "ok" : ""}"></i>${k}</span>`).join("");
+  } catch {}
+}
+
+// ---------- cards ----------
+function card(r, cited) {
+  const pend = r.status !== "done";
+  return `<div class="card ${cited ? "cited" : ""}" data-id="${r.id}">
+    <img loading="lazy" src="/img/${r.id}">
+    <div class="body">
+      <div class="meta">#${r.id} · ${fmt(r.ts)} · ${esc(r.device)}</div>
+      <div class="meta">${esc(r.app)}${r.title ? " — " + esc(r.title.slice(0, 60)) : ""}</div>
+      <div class="sum ${pend ? "pending" : ""}">${pend ? (r.status === "error" ? "indexing failed" : "indexing…") : esc(r.summary)}</div>
+    </div></div>`;
+}
+function renderGrid(rows, title, citedIds = []) {
+  $("#gridTitle").textContent = title;
+  $("#grid").innerHTML = rows.length ? rows.map(r => card(r, citedIds.includes(r.id))).join("")
+                                     : `<div class="empty">Nothing yet.</div>`;
+}
+$("#grid").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
+
+async function showLatest() {
+  if (!live) return;
+  const rows = await api("/api/browse?limit=48" + devParam());
+  renderGrid(rows, "Latest captures");
+}
+const devParam = () => $("#dev").value ? "&device=" + encodeURIComponent($("#dev").value) : "";
+
+// ---------- timeline ----------
+const BUCKET = 600;
+async function refreshTimeline() {
+  const data = await api(`/api/timeline?bucket=${BUCKET}`);
+  if (!data.length) { $("#timeline").innerHTML = `<div class="empty">No captures yet — start a capture agent.</div>`; return; }
+  const min = Math.min(...data.map(d => d.b)), max = Math.max(...data.map(d => d.b));
+  const nb = Math.min(Math.floor((max - min) / BUCKET) + 1, 400);
+  const start = max - (nb - 1) * BUCKET;
+  const peak = Math.max(...data.map(d => d.n));
+  const devs = [...new Set(data.map(d => d.device))];
+  let html = "";
+  for (const dv of devs) {
+    const by = Object.fromEntries(data.filter(d => d.device === dv).map(d => [d.b, d.n]));
+    html += `<div class="tlrow"><div class="lbl">${esc(dv)}</div>`;
+    for (let i = 0; i < nb; i++) {
+      const b = start + i * BUCKET, n = by[b];
+      html += n ? `<div class="bar" title="${fmt(b)} · ${n}" data-b="${b}" data-d="${esc(dv)}" style="height:${Math.max(4, 44 * n / peak)}px"></div>` : `<div class="gap"></div>`;
+    }
+    html += `</div>`;
+  }
+  html += `<div class="tlaxis">`;
+  for (let i = 0; i < nb; i++) {
+    const t = new Date((start + i * BUCKET) * 1000);
+    html += `<span>${t.getMinutes() === 0 ? t.getHours() + ":00" : ""}</span>`;
+  }
+  $("#timeline").innerHTML = html + `</div>`;
+}
+$("#timeline").addEventListener("click", async e => {
+  const b = e.target.closest(".bar"); if (!b) return;
+  document.querySelectorAll(".bar.sel").forEach(x => x.classList.remove("sel"));
+  b.classList.add("sel");
+  live = false;
+  const s = +b.dataset.b;
+  const rows = await api(`/api/browse?start=${s}&end=${s + BUCKET}&device=${encodeURIComponent(b.dataset.d)}&limit=200`);
+  renderGrid(rows.reverse(), `${b.dataset.d} · ${fmt(s)} – ${fmt(s + BUCKET)}`);
+});
+
+// ---------- search / ask ----------
+function setMode(m) {
+  mode = m;
+  $("#mAsk").classList.toggle("on", m === "ask");
+  $("#mSearch").classList.toggle("on", m === "search");
+  $("#q").placeholder = m === "ask" ? "What was the restaurant Sam mentioned on Slack?" : "flights to tokyo, invoice 4471, jane@acme.com…";
+}
+$("#mAsk").onclick = () => setMode("ask");
+$("#mSearch").onclick = () => setMode("search");
+
+async function run() {
+  const q = $("#q").value.trim();
+  if (!q) { live = true; $("#answer").style.display = "none"; return showLatest(); }
+  live = false;
+  if (mode === "search") {
+    $("#answer").style.display = "none";
+    const r = await api(`/api/search?q=${encodeURIComponent(q)}${devParam()}`);
+    renderGrid(r.results, `${r.results.length} results · ${r.ms} ms`);
+    return;
+  }
+  $("#answer").style.display = "block";
+  $("#answerText").innerHTML = `<span class="spin"></span> Searching your screens and thinking…`;
+  $("#answerActions").innerHTML = "";
+  try {
+    const r = await api("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"},
+                         body: JSON.stringify({q, device: $("#dev").value || null})});
+    lastSources = r.cited.length ? r.cited : r.sources.slice(0, 3).map(s => s.id);
+    const known = new Set(r.sources.map(s => s.id));
+    $("#answerText").innerHTML = esc(r.answer).replace(/\[?#(\d+)\]?/g, (m, id) => known.has(+id) ? `<span class="cite" data-id="${id}">#${id}</span>` : m);
+    $("#answerActions").innerHTML =
+      draftButtons("answer") + `<span class="meta">${r.ms ?? ""} ms · ${r.sources.length} moments retrieved</span>`;
+    renderGrid(r.sources, "Moments used", r.cited);
+  } catch (e) { $("#answerText").textContent = "Error: " + e.message; }
+}
+$("#go").onclick = run;
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+$("#dev").onchange = () => { $("#q").value ? run() : showLatest(); refreshPromises(); };
+$("#answerText").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
+
+// ---------- act ----------
+const KINDS = [["email", "Draft follow-up email"], ["message", "Draft message"], ["todo", "Make to-do list"], ["notes", "Summarize as notes"]];
+function draftButtons(src) {
+  return KINDS.map(([k, label]) => `<button class="btn" data-kind="${k}" data-src="${src}">${label}</button>`).join("");
+}
+async function doDraft(kind, ids, target) {
+  target.style.display = "block";
+  target.innerHTML = `<span class="spin"></span> Drafting on-device…`;
+  try {
+    const r = await api("/api/draft", {method: "POST", headers: {"Content-Type": "application/json"},
+                        body: JSON.stringify({ids, kind, instruction: $("#q").value.trim() && mode === "ask" ? "Context: the user asked \"" + $("#q").value.trim() + "\"" : ""})});
+    target.innerHTML = esc(r.draft) + `<div class="actions"><button class="btn" id="copyDraft">Copy</button></div>`;
+    target.querySelector("#copyDraft").onclick = () => navigator.clipboard.writeText(r.draft);
+  } catch (e) { target.textContent = "Error: " + e.message; }
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-kind]"); if (!b) return;
+  if (b.dataset.src === "answer") {
+    let box = $("#answerDraft");
+    if (!box) { box = document.createElement("div"); box.id = "answerDraft"; box.style.cssText = "white-space:pre-wrap;margin-top:12px;padding:12px;border:1px solid var(--accent);border-radius:8px;background:var(--bg)"; $("#answer").appendChild(box); }
+    doDraft(b.dataset.kind, lastSources, box);
+  } else {
+    doDraft(b.dataset.kind, [+$("#modal").dataset.id], $("#draft"));
+  }
+});
+
+// ---------- things you promised ----------
+const seenPromises = new Set();
+let promisesLoaded = false;
+async function refreshPromises() {
+  try {
+    const r = await api("/api/commitments?hours=48" + devParam());
+    const ul = $("#promises");
+    if (!r.items.length) { ul.innerHTML = `<li class="empty">Nothing found yet — it shows up here within a minute of being on screen.</li>`; return; }
+    ul.innerHTML = r.items.map(c => `<li class="${c.done ? "done" : ""} ${promisesLoaded && !seenPromises.has(c.id) ? "new" : ""}" data-id="${c.id}">
+        <input type="checkbox" ${c.done ? "checked" : ""} title="mark done">
+        <span class="kind ${esc(c.kind)}">${esc(c.kind)}</span>
+        <span class="ptext">${esc(c.text)}${c.due ? ` <span class="meta">· due ${esc(c.due)}</span>` : ""}${c.who && c.who !== "me" ? ` <span class="meta">· ${esc(c.who)}</span>` : ""}</span>
+        <span class="meta">${fmt(c.ts)} · ${esc(c.device)}</span>
+        <span class="cite" data-id="${c.capture_id}">#${c.capture_id}</span>
+      </li>`).join("");
+    r.items.forEach(c => seenPromises.add(c.id));
+    promisesLoaded = true;
+    $("#promHint").textContent = `· ${r.items.filter(c => !c.done).length} open · pulled from your screens as you work`;
+  } catch {}
+}
+$("#promises").addEventListener("click", async e => {
+  const cite = e.target.closest(".cite"); if (cite) return openModal(+cite.dataset.id);
+  if (e.target.type === "checkbox") {
+    const li = e.target.closest("li");
+    await api(`/api/commitments/${li.dataset.id}/done`, {method: "POST", headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({done: e.target.checked})});
+    li.classList.toggle("done", e.target.checked);
+  }
+});
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-standup]"); if (!b) return;
+  const box = $("#standupBox");
+  box.style.display = "block";
+  box.innerHTML = `<span class="spin"></span> Reading today's activity log on-device…`;
+  try {
+    const r = await api(`/api/standup?kind=${b.dataset.standup}${devParam()}`);
+    box.innerHTML = esc(r.text) + `<div class="actions"><button class="btn" id="copyStandup">Copy</button>` +
+      `<span class="meta">${r.spans ?? 0} activity spans · ${r.captures ?? 0} captures · ${r.ms} ms</span></div>`;
+    box.querySelector("#copyStandup").onclick = () => navigator.clipboard.writeText(r.text);
+  } catch (err) { box.textContent = "Error: " + err.message; }
+});
+
+// ---------- modal ----------
+async function openModal(id) {
+  const r = await api("/api/capture/" + id);
+  $("#modal").dataset.id = id;
+  $("#mImg").src = "/img/" + id;
+  $("#mMeta").innerHTML = `#${r.id} · ${fmt(r.ts)} · ${esc(r.device)}<br>${esc(r.app)} — ${esc(r.title)}`;
+  $("#mSum").textContent = r.summary || (r.status === "done" ? "" : "Still indexing…");
+  $("#mOcr").textContent = r.ocr || "—";
+  $("#mActions").innerHTML = draftButtons("modal");
+  $("#draft").style.display = "none";
+  $("#modal").style.display = "block";
+}
+$("#modal").addEventListener("click", e => { if (e.target.id === "modal") $("#modal").style.display = "none"; });
+document.addEventListener("keydown", e => { if (e.key === "Escape") $("#modal").style.display = "none"; });
+
+// ---------- loop ----------
+refreshHealth().then(refreshStats); refreshTimeline(); showLatest(); refreshPromises();
+setInterval(refreshStats, 3000);
+setInterval(refreshPromises, 4000);
+setInterval(refreshHealth, 10000);
+setInterval(refreshTimeline, 15000);
+setInterval(showLatest, 5000);
+</script>
+</body>
+</html>
