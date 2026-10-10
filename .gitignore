@@ -1,0 +1,9 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Dockt runtime data (screenshots + DB are private), logs, agent spool
+dockt-patched/server/data/
+data/
+*.log

@@ -29,6 +29,20 @@ LLM_NO_THINK = _env("LLM_NO_THINK", "1") == "1"
 _client = httpx.AsyncClient(timeout=httpx.Timeout(120, connect=5),
                             headers={"Authorization": f"Bearer {API_KEY}"})
 
+
+async def _complete(url: str, body: dict, no_think: bool) -> str:
+    if no_think:
+        # Ollama ignores chat_template_kwargs and puts a thinking model's whole reply in
+        # "reasoning" (empty "content") unless reasoning_effort is "none".
+        body = {**body, "reasoning_effort": "none"}
+    r = await _client.post(f"{url}/chat/completions", json=body)
+    if r.status_code == 400 and "reasoning_effort" in body:
+        # Servers that only accept low/medium/high reject "none"; retry without it.
+        body.pop("reasoning_effort")
+        r = await _client.post(f"{url}/chat/completions", json=body)
+    r.raise_for_status()
+    return _strip_think(r.json()["choices"][0]["message"].get("content") or "")
+
 VLM_PROMPT = """You are indexing a screenshot of a person's computer screen so they can search for it later.
 Active app: {app}
 Window title: {title}
@@ -53,9 +67,7 @@ async def describe(jpeg: bytes, app: str, title: str) -> tuple[str, str]:
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
         ]}],
     }
-    r = await _client.post(f"{VLM_URL}/chat/completions", json=body)
-    r.raise_for_status()
-    out = _strip_think(r.json()["choices"][0]["message"]["content"])
+    out = await _complete(VLM_URL, body, no_think=True)
     m = re.search(r"SUMMARY:\s*(.*?)(?:\n\s*TEXT:|$)", out, re.S | re.I)
     t = re.search(r"TEXT:\s*(.*)", out, re.S | re.I)
     summary = (m.group(1) if m else out).strip()
@@ -82,10 +94,7 @@ async def chat(system: str, user: str, max_tokens: int = 700, temperature: float
         # chat_template_kwargs for vLLM-served Nemotron 3 / Qwen3. Ollama ignores unknown fields.
         body["messages"][0]["content"] = "/no_think\n" + system
         body["chat_template_kwargs"] = {"enable_thinking": False}
-    r = await _client.post(f"{LLM_URL}/chat/completions", json=body)
-    r.raise_for_status()
-    msg = r.json()["choices"][0]["message"]
-    return _strip_think(msg.get("content") or "")
+    return await _complete(LLM_URL, body, no_think=LLM_NO_THINK)
 
 
 async def health() -> dict:
