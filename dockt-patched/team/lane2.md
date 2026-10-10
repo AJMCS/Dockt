@@ -2,6 +2,8 @@
 
 ## Task card
 
+**Lead.** Brandon Shen (GitHub `B92064`).
+
 **Goal.** A ChatGPT-style dashboard served by the local service: streaming chat with citation chips that open the screenshot, a sources panel, the "Things you promised" panel, standup/timesheet, draft-from-answer, timeline and search, plus the two deep links other lanes use.
 
 **Files owned.** `server/static/` (today a single `index.html` that already has most panels in a search-box layout). A `web/` folder with a build step is allowed, but the output must be static files under `server/static/` served at `/` and `/static/…`, and the launcher must not need Node. Recommendation for tonight: stay in `index.html` + plain JS; it already has stats header, promises panel, timeline, modal with screen text, draft buttons, standup buttons.
@@ -36,7 +38,7 @@ The team works in 4 lanes with fixed contracts in TEAM.md §3:
 3 Agentic layer (server/brain.py: /api/chat agent, ask, drafts, standup, promise extraction, nudges)
 4 Models + Memory (GX10 serving, models.py, store.py, memory.py, indexer.py, mocks)
 
-I am [NAME], LANE 2. Demo: about 4 minutes, live, two Windows laptops, projector, probably tonight (feature freeze 19:30 if the deadline is confirmed). Optimize for what judges see in 4 minutes.
+I am Brandon Shen, LANE 2. Demo: about 4 minutes, live, two Windows laptops, projector, probably tonight (feature freeze 19:30 if the deadline is confirmed). Optimize for what judges see in 4 minutes.
 
 MY FILES: server/static/ (today one file, server/static/index.html, which already has: stats header with model dots, Ask/Search box with an answer card and citation chips, "Things you promised" panel polling /api/commitments, standup/timesheet buttons, a timeline, a card grid, and a modal with screenshot + summary + screen text + draft buttons). Keep it plain HTML/JS in index.html unless you have a very good reason; the service serves index.html at / and anything else in server/static/ at /static/<file>. Nothing else is mine. Do not edit server code; if the API lacks something, write the proposed addition to TEAM.md §3 and stop.
 

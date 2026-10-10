@@ -59,6 +59,7 @@ The **whole application** runs on each user's own computer (the demo is on **Win
 **Develop alone with:** the local service on mock models (§6 A). Until `/api/chat` exists, call `/api/ask`. It returns the same `answer / sources / cited` fields.
 
 ### Lane 2 — App (dashboard)
+**Lead:** Brandon Shen (GitHub `B92064`).
 **Owns:** `server/static/`, or a new `web/` folder if you move to a framework.
 **Tech:** your choice (plain JS, React/Vite, …). Node is fine on dev machines. For the demo, build to static files that the local service serves at `http://127.0.0.1:8000/`, so the launcher only has to start one thing. If you'd rather ship Electron/Tauri, agree it with Lane 1 first, since they own the window/tray shell.
 **Builds:** the main page: a ChatGPT-style conversation with streaming answers, citation chips that open the screenshot + its summary/text, a sources side panel, search, a timeline of the day, the "Things you promised" panel, standup/timesheet buttons, and a draft (email/message) action on any answer.
