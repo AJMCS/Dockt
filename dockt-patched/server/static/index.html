@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dockt</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%2376b900'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0b0d10; --panel: #13161b; --panel2: #1a1e25; --line: #262b34;
@@ -30,13 +31,24 @@
   .mode button { background: none; border: 0; color: var(--dim); padding: 0 16px; font: inherit; cursor: pointer; }
   .mode button.on { background: var(--panel2); color: var(--text); }
   #q { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; color: var(--text);
-       font: inherit; font-size: 17px; padding: 14px 16px; outline: none; }
+       font: inherit; font-size: 17px; padding: 14px 16px; outline: none; resize: none; max-height: 160px; }
   #q:focus { border-color: var(--accent); }
   select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 0 10px; font: inherit; }
   .go { background: var(--accent); color: #0b0d10; border: 0; border-radius: 10px; padding: 0 22px; font-weight: 600; font: inherit; cursor: pointer; }
-  #answer { display: none; margin-top: 18px; background: var(--panel); border: 1px solid var(--line);
-            border-left: 3px solid var(--accent); border-radius: 10px; padding: 16px 18px; }
-  #answer .text { white-space: pre-wrap; }
+  .go:disabled { opacity: .5; cursor: wait; }
+  /* chat column + sources panel */
+  .chatwrap { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; align-items: start; }
+  #thread { display: flex; flex-direction: column; gap: 12px; min-height: 160px; max-height: calc(100vh - 230px);
+            overflow-y: auto; padding: 4px 2px 16px; }
+  .msg { max-width: 85%; padding: 12px 16px; border-radius: 12px; border: 1px solid var(--line); }
+  .msg.user { align-self: flex-end; background: var(--panel2); }
+  .msg.bot { align-self: flex-start; background: var(--panel); border-left: 3px solid var(--accent); }
+  .msg .text { white-space: pre-wrap; }
+  .hint { color: var(--dim); }
+  #sourcesPane h3 { margin-top: 4px; }
+  #sources { display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 150px); overflow-y: auto; }
+  #sources .card { flex: none; }
+  #sources .card img { aspect-ratio: 16/9; }
   .cite { display: inline-block; background: var(--chip); color: var(--accent2); border-radius: 6px; padding: 0 6px;
           font-family: var(--mono); font-size: 12px; cursor: pointer; }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
@@ -86,6 +98,7 @@
   .kind.deadline { color: var(--warn); border-color: var(--warn); }
   .kind.request { color: #60a5fa; border-color: #60a5fa; }
   #standupBox { display: none; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--accent); border-radius: 10px; padding: 14px 16px; margin-top: 12px; font-size: 14px; }
+  @media (max-width: 900px) { .chatwrap { grid-template-columns: 1fr; } }
   @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal img { border-radius: 12px 12px 0 0; } .stats { display: none; } }
 </style>
 </head>
@@ -96,16 +109,21 @@
   <div class="stats" id="stats"></div>
 </header>
 <main>
-  <div class="searchrow">
-    <div class="mode"><button id="mAsk" class="on">Ask</button><button id="mSearch">Search</button></div>
-    <input id="q" placeholder="What was the restaurant Sam mentioned on Slack?" autofocus>
-    <select id="dev"><option value="">All devices</option></select>
-    <button class="go" id="go">Go</button>
-  </div>
-
-  <div id="answer">
-    <div class="text" id="answerText"></div>
-    <div class="actions" id="answerActions"></div>
+  <div class="chatwrap">
+    <section>
+      <div id="thread"></div>
+      <div class="searchrow">
+        <div class="mode"><button id="mAsk" class="on">Ask</button><button id="mSearch">Search</button></div>
+        <textarea id="q" rows="1" placeholder="What was the restaurant Sam mentioned on Slack?" autofocus></textarea>
+        <select id="dev"><option value="">All devices</option></select>
+        <button class="go" id="go">Send</button>
+        <button class="btn" id="newChat" title="Clear this conversation">New chat</button>
+      </div>
+    </section>
+    <aside id="sourcesPane">
+      <h3>Sources</h3>
+      <div id="sources"></div>
+    </aside>
   </div>
 
   <div class="todayhead">
@@ -143,7 +161,7 @@
 const $ = s => document.querySelector(s);
 const esc = s => (s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmt = ts => new Date(ts * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"});
-let mode = "ask", live = true, lastSources = [];
+let mode = "ask", live = true, busy = false;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -244,38 +262,144 @@ function setMode(m) {
   $("#mAsk").classList.toggle("on", m === "ask");
   $("#mSearch").classList.toggle("on", m === "search");
   $("#q").placeholder = m === "ask" ? "What was the restaurant Sam mentioned on Slack?" : "flights to tokyo, invoice 4471, jane@acme.com…";
+  $("#go").textContent = m === "ask" ? "Send" : "Search";
 }
 $("#mAsk").onclick = () => setMode("ask");
 $("#mSearch").onclick = () => setMode("search");
 
 async function run() {
   const q = $("#q").value.trim();
-  if (!q) { live = true; $("#answer").style.display = "none"; return showLatest(); }
-  live = false;
   if (mode === "search") {
-    $("#answer").style.display = "none";
+    if (!q) { live = true; return showLatest(); }
+    live = false;
     const r = await api(`/api/search?q=${encodeURIComponent(q)}${devParam()}`);
     renderGrid(r.results, `${r.results.length} results · ${r.ms} ms`);
     return;
   }
-  $("#answer").style.display = "block";
-  $("#answerText").innerHTML = `<span class="spin"></span> Searching your screens and thinking…`;
-  $("#answerActions").innerHTML = "";
-  try {
-    const r = await api("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"},
-                         body: JSON.stringify({q, device: $("#dev").value || null})});
-    lastSources = r.cited.length ? r.cited : r.sources.slice(0, 3).map(s => s.id);
-    const known = new Set(r.sources.map(s => s.id));
-    $("#answerText").innerHTML = esc(r.answer).replace(/\[?#(\d+)\]?/g, (m, id) => known.has(+id) ? `<span class="cite" data-id="${id}">#${id}</span>` : m);
-    $("#answerActions").innerHTML =
-      draftButtons("answer") + `<span class="meta">${r.ms ?? ""} ms · ${r.sources.length} moments retrieved</span>`;
-    renderGrid(r.sources, "Moments used", r.cited);
-  } catch (e) { $("#answerText").textContent = "Error: " + e.message; }
+  if (!q || busy) return;
+  $("#q").value = ""; autosize();
+  await sendChat(q);
 }
+function autosize() { const q = $("#q"); q.style.height = "auto"; q.style.height = Math.min(q.scrollHeight, 160) + "px"; }
 $("#go").onclick = run;
-$("#q").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
-$("#dev").onchange = () => { $("#q").value ? run() : showLatest(); refreshPromises(); };
-$("#answerText").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
+$("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); run(); } });
+$("#q").addEventListener("input", autosize);
+$("#dev").onchange = () => { mode === "search" && $("#q").value ? run() : showLatest(); refreshPromises(); };
+
+// ---------- chat (POST /api/chat, streamed) ----------
+let messages = [];   // the whole conversation, sent to /api/chat every turn
+const WELCOME = `<div class="empty">Ask about anything that was on your screen. Every answer links to the screenshot it came from.</div>`;
+const NO_SOURCES = `<div class="empty">The screenshots behind each answer show up here.</div>`;
+const chip = id => `<span class="cite" data-id="${id}">#${id}</span>`;
+// [#9], #9 and a plain [9] become chips, but only for ids this answer actually retrieved
+const linkCites = (text, known) =>
+  esc(text).replace(/\[?#(\d+)\]?|\[(\d+)\]/g, (m, a, b) => known.has(+(a || b)) ? chip(a || b) : m);
+const scrollThread = () => { const t = $("#thread"); t.scrollTop = t.scrollHeight; };
+
+function bubble(role, html) {
+  $("#thread > .empty")?.remove();   // the welcome line
+  const msg = document.createElement("div");
+  msg.className = "msg " + role;
+  msg.innerHTML = `<div class="text">${html}</div>`;
+  $("#thread").appendChild(msg);
+  scrollThread();
+  return msg;
+}
+
+function showSources(items, cited = []) {
+  const rows = [...items].sort((a, b) => cited.includes(b.id) - cited.includes(a.id));   // cited first, else keep rank
+  $("#sources").innerHTML = rows.length ? rows.map(r => card(r, cited.includes(r.id))).join("") : NO_SOURCES;
+}
+
+// Final render of one assistant turn: chips, draft buttons, cited sources highlighted.
+function renderFinal(turn, ev) {
+  const known = new Set(turn.sources.map(s => s.id));
+  const cited = (ev.cited || []).filter(id => known.has(id));
+  turn.msg.dataset.ids = (cited.length ? cited : turn.sources.slice(0, 3).map(s => s.id)).join(",");
+  turn.body.innerHTML = linkCites(ev.answer, known);
+  if (turn.sources.length)
+    turn.msg.insertAdjacentHTML("beforeend", `<div class="actions">${draftButtons("answer")}` +
+      `<span class="meta">${ev.ms ?? ""} ms · ${turn.sources.length} moments retrieved</span></div>`);
+  showSources(turn.sources, cited);
+}
+
+// Apply one stream event to the current assistant turn.
+//   turn = {msg, body, text, sources}: body is the bubble's text element, text = tokens so far.
+//   Event order (TEAM.md §3.1): status* → token* → sources → done | error
+//   Helpers: renderFinal(turn, ev), showSources(items, cited), esc(s), messages (history array).
+function handleEvent(turn, ev) {
+  switch (ev.type) {
+    case "status":   // a hint only until the answer starts
+      if (!turn.text) turn.body.innerHTML = `<span class="hint"><span class="spin"></span> ${esc(ev.text)}</span>`;
+      break;
+    case "token":
+      turn.text += ev.text;
+      turn.body.textContent = turn.text;
+      break;
+    case "sources":
+      turn.sources = ev.items || [];
+      showSources(turn.sources);
+      break;
+    case "done":
+      renderFinal(turn, ev);
+      messages.push({role: "assistant", content: ev.answer});
+      break;
+    case "error":    // ev.text can be a raw exception: never show it
+      turn.body.innerHTML = `<span class="hint">Couldn't get an answer just now. Check that the GX10 is reachable and try again.</span>`;
+      if (messages.at(-1)?.role === "user") messages.pop();   // keep history alternating user/assistant
+      console.warn("chat error:", ev.text);
+      break;
+  }
+}
+
+async function sendChat(q) {
+  messages.push({role: "user", content: q});
+  bubble("user", esc(q));
+  const msg = bubble("bot", `<span class="hint"><span class="spin"></span> Thinking…</span>`);
+  const turn = {msg, body: msg.querySelector(".text"), text: "", sources: [], ended: false};
+  const onEvent = ev => {
+    if (ev.type === "done" || ev.type === "error") turn.ended = true;
+    handleEvent(turn, ev);
+    scrollThread();
+  };
+  busy = $("#go").disabled = true;
+  try {
+    const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
+                          body: JSON.stringify({messages, stream: true})});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "";
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += value.replace(/\r\n/g, "\n");
+      let cut;
+      while ((cut = buf.indexOf("\n\n")) >= 0) {   // an event ends at a blank line; a chunk may hold several, or half of one
+        const block = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        for (const line of block.split("\n"))
+          if (line.startsWith("data: ")) onEvent(JSON.parse(line.slice(6)));
+      }
+    }
+    if (!turn.ended) onEvent({type: "error", text: "stream closed before done"});
+  } catch (e) {
+    if (!turn.ended) onEvent({type: "error", text: String(e)});
+  } finally {
+    busy = $("#go").disabled = false;
+  }
+}
+
+$("#newChat").onclick = () => {
+  if (busy) return;
+  messages = [];
+  $("#thread").innerHTML = WELCOME;
+  $("#sources").innerHTML = NO_SOURCES;
+  $("#q").focus();
+};
+$("#thread").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
+$("#sources").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
+$("#thread").innerHTML = WELCOME;
+$("#sources").innerHTML = NO_SOURCES;
 
 // ---------- act ----------
 const KINDS = [["email", "Draft follow-up email"], ["message", "Draft message"], ["todo", "Make to-do list"], ["notes", "Summarize as notes"]];
@@ -285,19 +409,21 @@ function draftButtons(src) {
 async function doDraft(kind, ids, target) {
   target.style.display = "block";
   target.innerHTML = `<span class="spin"></span> Drafting on-device…`;
+  const lastQ = messages.findLast(m => m.role === "user")?.content || "";
   try {
     const r = await api("/api/draft", {method: "POST", headers: {"Content-Type": "application/json"},
-                        body: JSON.stringify({ids, kind, instruction: $("#q").value.trim() && mode === "ask" ? "Context: the user asked \"" + $("#q").value.trim() + "\"" : ""})});
-    target.innerHTML = esc(r.draft) + `<div class="actions"><button class="btn" id="copyDraft">Copy</button></div>`;
-    target.querySelector("#copyDraft").onclick = () => navigator.clipboard.writeText(r.draft);
-  } catch (e) { target.textContent = "Error: " + e.message; }
+                        body: JSON.stringify({ids, kind, instruction: lastQ ? `Context: the user asked "${lastQ}"` : ""})});
+    target.innerHTML = esc(r.draft) + `<div class="actions"><button class="btn copy">Copy</button></div>`;
+    target.querySelector(".copy").onclick = () => navigator.clipboard.writeText(r.draft);
+    return r.draft;
+  } catch { target.textContent = "Couldn't write that draft just now. Try again in a moment."; }
 }
-document.addEventListener("click", e => {
+document.addEventListener("click", async e => {
   const b = e.target.closest("button[data-kind]"); if (!b) return;
   if (b.dataset.src === "answer") {
-    let box = $("#answerDraft");
-    if (!box) { box = document.createElement("div"); box.id = "answerDraft"; box.style.cssText = "white-space:pre-wrap;margin-top:12px;padding:12px;border:1px solid var(--accent);border-radius:8px;background:var(--bg)"; $("#answer").appendChild(box); }
-    doDraft(b.dataset.kind, lastSources, box);
+    const ids = b.closest(".msg").dataset.ids.split(",").map(Number);
+    const draft = await doDraft(b.dataset.kind, ids, bubble("bot", "").querySelector(".text"));
+    if (draft) messages.push({role: "assistant", content: draft});   // so "make it shorter" has context
   } else {
     doDraft(b.dataset.kind, [+$("#modal").dataset.id], $("#draft"));
   }
