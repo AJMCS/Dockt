@@ -35,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]           # dockt-patched/
 HOME = Path.home() / ".dockt"
 LOGS = HOME / "logs"
-PORT = int(os.environ.get("DOCKT_PORT", "8000"))
+PORT = int(os.environ.get("DOCKT_PORT", "8000"))   # resolve_port() may change it
 BASE = f"http://127.0.0.1:{PORT}"
 CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
 ICON = Path(__file__).with_name("dockt.ico")
@@ -58,6 +58,27 @@ def clean_hash(h: str | None) -> str:
     if h.startswith("#"):
         h = h[1:].lstrip("/")
     return "#/" + h if h.startswith(("capture/", "chat?")) else ""
+
+
+def port_free(port: int) -> bool:
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def resolve_port():
+    """Same rule as Lane 1's start-dockt.bat (agent/find_port.py): DOCKT_PORT if set, else a Dockt
+    already answering in 8000-8099, else the first free port there. Children inherit DOCKT_PORT/DOCKT_URL."""
+    global PORT, BASE
+    if "DOCKT_PORT" not in os.environ:
+        ports = range(8000, 8100)
+        running = next((p for p in ports if answers(f"http://127.0.0.1:{p}/api/stats", timeout=0.3)), None)
+        PORT = running or next((p for p in ports if port_free(p)), 8000)
+        BASE = f"http://127.0.0.1:{PORT}"
+    os.environ["DOCKT_PORT"], os.environ["DOCKT_URL"] = str(PORT), BASE
 
 
 def spawn(name: str, args: list[str], env: dict) -> subprocess.Popen:
@@ -208,6 +229,7 @@ def main():
     except OSError:
         control = None   # port taken by something else: run anyway, just without hand-off
 
+    resolve_port()
     import webview   # pywebview; imported late so --open hand-offs stay instant
     if os.name == "nt":   # own taskbar group and icon instead of Python's
         try:
