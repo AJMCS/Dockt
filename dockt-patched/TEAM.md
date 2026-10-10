@@ -50,7 +50,7 @@ The **whole application** runs on each user's own computer (the demo is on **Win
 - Keep `capture.py` working on Windows (change detection, spool, exclusions, pause file); it posts to the **local** service (`http://127.0.0.1:8000/ingest`).
 - Tray icon with status (capturing / paused / GX10 unreachable) and a pause toggle.
 - Global hotkey (e.g. Ctrl+Space) → small quick-chat window that sends `POST /api/chat`, shows the answer with source thumbnails (`GET /img/{id}`), and has an "Open in Dockt" link to Lane 2's deep links (§3.1).
-- Opening the dashboard: easiest on Windows is an Edge app window, `msedge --app=http://127.0.0.1:8000`, which looks like a desktop app with no Electron.
+- Opening the dashboard: **Lane 2 ships a native desktop window** (`desktop/dockt_desktop.py`, see §3.1 "Desktop window"). The launcher and tray open Dockt by running it (or by calling its `/open` URL), not `msedge --app`.
 - One-click start for the demo: a launcher that starts the local service, capture and tray, and points them at the GX10 (`start-dockt.bat` or a packaged exe).
 - Voice (stretch): push-to-talk → `POST /api/transcribe` → text to `/api/chat`. Spoken answer (optional) with Windows' built-in speech (SAPI). No cloud speech.
 - Show Lane 3's nudges as Windows notifications (stretch, `GET /api/nudges`).
@@ -151,6 +151,12 @@ Additive changes (new optional fields) are fine without asking. Renaming or remo
 // stream: false → one JSON body: {"answer", "sources", "cited", "ms"}  (same as /api/ask)
 ```
 Until L3 ships it, consumers call `/api/ask` with the last user message. The non-stream shape is the same.
+
+**Desktop window** (L2, `desktop/dockt_desktop.py`, needs `requirements-desktop.txt` = pywebview; WebView2 on Windows):
+- `pythonw desktop\dockt_desktop.py [--mock] [--no-capture] [--open "#/capture/9"]`, or double-click `desktop\Dockt.bat` (sets up `.venv` on first run). `desktop\install-shortcut.ps1` adds Desktop + Start menu shortcuts with the Dockt icon.
+- If nothing answers on `127.0.0.1:8000`, it starts `server/app.py` and `agent/capture.py` itself (GX10 from `gx10.txt` / `DOCKT_GX10`, same env defaults as `start-dockt.bat`), and stops them when the window closes. If the service is already running (e.g. started by the launcher), it only opens the window.
+- One window only. To show it, optionally on a deep link: `GET http://127.0.0.1:8765/open?hash=%23%2Fcapture%2F9` → `ok` (brings the window up and navigates), or run it again with `--open`. This is what the tray's "Open Dockt" and the quick-chat's chips / "Open in Dockt" should call.
+- Logs in `~/.dockt/logs/`; chat history + theme persist in `~/.dockt/webview`.
 
 ### 3.2 Python interfaces (inside the local service; L4 provides, L3 consumes)
 ```python
