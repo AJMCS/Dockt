@@ -11,7 +11,10 @@ Lane 2, the dashboard.
 Lane 3, the brain.
 - Gets: a search function over the screenshots, an activity timeline function, a list-promises function, and a "talk to Nemotron" function that supports tools.
 - Hands back: the chat endpoint. Give it the conversation, it searches the screenshots, answers in plain language, and cites the exact screenshot ids it used. If it finds nothing it says so instead of guessing. Also the promise extractor that watches new screenshots and pulls out "I'll send X by Friday" lines.
-ne 4, the models and storagGets: raw screenshots comint requests to forward to theGX10.Hands back: the GX10 reachaw it only answers itself,that's the first job). The e calls: describe a screenshot, embed text, chat with toolsversions of those so people
-  can work without the GX10.
+
+Lane 4, the models and storage.
+- Gets: raw screenshots coming in, questions to embed, chat requests to forward to the GX10.
+- Hands back: the GX10 reachable from the laptop (right now it only answers itself, that's the first job). The Python functions everyone else calls: describe a screenshot, embed text, chat with tools, transcribe audio. The fake versions of those so people can work without the GX10. The database and search.
+  
 
 How it chains: Lane 1 drops sand stores them → Lane 3answers questions from that s the answer.
