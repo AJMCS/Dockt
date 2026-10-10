@@ -89,6 +89,21 @@
   .go:disabled { opacity: .4; cursor: wait; }
   .go svg { width: 18px; height: 18px; }
 
+  /* recent chats */
+  #history h3 { margin: 28px 0 6px; }
+  #chatList { list-style: none; margin: 0; padding: 0; max-height: 228px; overflow-y: auto; }
+  #chatList li { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 10px; cursor: pointer; transition: background .15s; }
+  #chatList li:hover { background: var(--hover); }
+  #chatList li.on { background: var(--surface2); }
+  #chatList li.on .ctitle { font-weight: 500; }
+  .ctitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  #chatList .meta { white-space: nowrap; }
+  .del { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 17px; line-height: 1; padding: 2px 7px; border-radius: 6px;
+         opacity: 0; transition: opacity .15s, background .15s; }
+  #chatList li:hover .del, .del:focus-visible { opacity: 1; }
+  .del:hover { background: var(--hover); color: var(--text); }
+  @media (hover: none) { .del { opacity: 1; } }
+
   /* buttons */
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
   .btn { background: transparent; border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; font-size: 13.5px; cursor: pointer;
@@ -196,6 +211,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
           </button>
         </div>
+      </div>
+      <div id="history" hidden>
+        <h3>Recent chats</h3>
+        <ul id="chatList"></ul>
       </div>
     </section>
     <aside id="sourcesPane">
@@ -313,7 +332,8 @@ $("#q").addEventListener("input", autosize);
 $("#dev").onchange = () => { refreshPromises(); refreshTimeline(); };
 
 // ---------- chat (POST /api/chat, streamed) ----------
-let messages = [];   // the whole conversation, sent to /api/chat every turn
+let messages = [];   // the whole conversation; role/content go to /api/chat every turn, the rest is for re-rendering
+const slim = items => items.map(({ocr, ...c}) => c);   // keep saved chats small: no screen text
 const WELCOME = `<div class="empty">Ask about anything that was on your screen. Every answer links to the screenshot it came from.</div>`;
 const NO_SOURCES = `<div class="empty">The screenshots behind each answer show up here.</div>`;
 const chip = id => `<span class="cite" data-id="${id}">#${id}</span>`;
@@ -369,7 +389,8 @@ function handleEvent(turn, ev) {
       break;
     case "done":
       renderFinal(turn, ev);
-      messages.push({role: "assistant", content: ev.answer});
+      messages.push({role: "assistant", content: ev.answer, sources: slim(turn.sources), cited: ev.cited || [], ms: ev.ms});
+      saveChat();
       break;
     case "error":    // ev.text can be a raw exception: never show it
       turn.body.innerHTML = `<span class="hint">Couldn't get an answer just now. Check that the GX10 is reachable and try again.</span>`;
@@ -392,7 +413,7 @@ async function sendChat(q) {
   busy = $("#go").disabled = true;
   try {
     const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
-                          body: JSON.stringify({messages, stream: true})});
+                          body: JSON.stringify({messages: messages.map(({role, content}) => ({role, content})), stream: true})});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
@@ -416,13 +437,60 @@ async function sendChat(q) {
   }
 }
 
-$("#newChat").onclick = () => {
+function newChat() {
   if (busy) return;
-  messages = [];
+  messages = []; chatId = null;
   $("#thread").innerHTML = WELCOME;
-  showSources([]); tlSel = null; refreshTimeline();
+  showSources([]); tlSel = null; refreshTimeline(); renderChatList();
   $("#q").focus();
-};
+}
+$("#newChat").onclick = newChat;
+
+// ---------- recent chats (this browser's localStorage only: stays on the laptop) ----------
+const CHATS_KEY = "dockt-chats", MAX_CHATS = 30;
+let chatId = null;   // id of the open conversation once it has been saved
+function loadChats() { try { return JSON.parse(localStorage.getItem(CHATS_KEY)) || []; } catch { return []; } }
+function storeChats(chats) { try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, MAX_CHATS))); } catch {} }
+function saveChat() {
+  if (!messages.length) return;
+  chatId ??= Date.now();
+  const title = (messages.find(m => m.role === "user")?.content || "Chat").slice(0, 80);
+  storeChats([{id: chatId, title, ts: Date.now(), messages}, ...loadChats().filter(c => c.id !== chatId)]);
+  renderChatList();
+}
+function renderChatList() {
+  const chats = loadChats();
+  $("#history").hidden = !chats.length;
+  $("#chatList").innerHTML = chats.map(c => `<li class="${c.id === chatId ? "on" : ""}" data-id="${c.id}" title="${esc(c.title)}">
+      <span class="ctitle">${esc(c.title)}</span><span class="meta">${fmt(c.ts / 1000)}</span>
+      <button class="del" title="Delete" aria-label="Delete this chat">×</button></li>`).join("");
+}
+function renderConversation() {
+  $("#thread").innerHTML = messages.length ? "" : WELCOME;
+  showSources([]);
+  for (const m of messages) {
+    if (m.role === "user") { bubble("user", esc(m.content)); continue; }
+    const msg = bubble(m.draft ? "bot draft" : "bot", ""), body = msg.querySelector(".text");
+    if (m.draft) {
+      body.innerHTML = md(m.content) + `<div class="actions"><button class="btn copy">Copy</button></div>`;
+      body.querySelector(".copy").onclick = () => navigator.clipboard.writeText(m.content);
+    } else renderFinal({msg, body, sources: m.sources || []}, {answer: m.content, cited: m.cited || [], ms: m.ms});
+  }
+  scrollThread();
+}
+$("#chatList").addEventListener("click", e => {
+  const li = e.target.closest("li"); if (!li || busy) return;
+  const id = +li.dataset.id;
+  if (e.target.closest(".del")) {
+    storeChats(loadChats().filter(c => c.id !== id));
+    return id === chatId ? newChat() : renderChatList();
+  }
+  const c = loadChats().find(c => c.id === id); if (!c) return;
+  chatId = id; messages = c.messages;
+  renderConversation(); renderChatList();
+  $("#q").focus();
+});
+renderChatList();
 $("#thread").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
 $("#sources").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
 $("#thread").innerHTML = WELCOME;
@@ -450,7 +518,7 @@ document.addEventListener("click", async e => {
   if (b.dataset.src === "answer") {
     const ids = b.closest(".msg").dataset.ids.split(",").map(Number);
     const draft = await doDraft(b.dataset.kind, ids, bubble("bot draft", "").querySelector(".text"));
-    if (draft) messages.push({role: "assistant", content: draft});   // so "make it shorter" has context
+    if (draft) { messages.push({role: "assistant", content: draft, draft: true}); saveChat(); }   // so "make it shorter" has context
   } else {
     doDraft(b.dataset.kind, [+$("#modal").dataset.id], $("#draft"));
   }
@@ -499,7 +567,8 @@ document.addEventListener("click", async e => {
     box.innerHTML = md(r.text) + `<div class="actions"><button class="btn copy">Copy</button>` +
       `<span class="meta">${r.spans ?? 0} activity spans · ${r.captures ?? 0} captures · ${r.ms} ms</span></div>`;
     box.querySelector(".copy").onclick = () => navigator.clipboard.writeText(r.text);
-    messages.push({role: "user", content: ask}, {role: "assistant", content: r.text});
+    messages.push({role: "user", content: ask}, {role: "assistant", content: r.text, draft: true});
+    saveChat();
   } catch {
     box.innerHTML = `<span class="hint">Couldn't read today's activity just now. Try again in a moment.</span>`;
   } finally { busy = false; scrollThread(); }
