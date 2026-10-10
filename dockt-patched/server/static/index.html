@@ -60,7 +60,6 @@
   .gap { width: 10px; flex: none; }
   .tlaxis { display: flex; gap: 2px; margin-left: 110px; font-size: 10px; color: var(--dim); font-family: var(--mono); }
   .tlaxis span { width: 10px; flex: none; overflow: visible; white-space: nowrap; }
-  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; transition: border-color .15s; }
   .card:hover { border-color: var(--accent); }
   .card.cited { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
@@ -113,7 +112,7 @@
       </div>
     </section>
     <aside id="sourcesPane">
-      <h3>Sources</h3>
+      <h3 id="sourcesTitle">Sources</h3>
       <div id="sources"></div>
     </aside>
   </div>
@@ -130,8 +129,6 @@
   <h3>Timeline <span class="meta" id="tlhint">· click a bar to jump there</span></h3>
   <div id="timeline"></div>
 
-  <h3 id="gridTitle">Latest captures</h3>
-  <div id="grid"></div>
 </main>
 
 <div id="modal"><div class="box">
@@ -153,7 +150,7 @@ const $ = s => document.querySelector(s);
 const esc = s => (s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");   // models write **bold**; that's all we render
 const fmt = ts => new Date(ts * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"});
-let live = true, busy = false;
+let busy = false;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -181,17 +178,6 @@ function card(r, cited) {
       <div class="meta">${esc(r.app)}${r.title ? " — " + esc(r.title.slice(0, 60)) : ""}</div>
       <div class="sum ${pend ? "pending" : ""}">${pend ? (r.status === "error" ? "indexing failed" : "indexing…") : esc(r.summary)}</div>
     </div></div>`;
-}
-function renderGrid(rows, title, citedIds = [], empty = "Nothing indexed yet. Start capturing and your screens show up here.") {
-  $("#gridTitle").textContent = title;
-  $("#grid").innerHTML = rows.length ? rows.map(r => card(r, citedIds.includes(r.id))).join("")
-                                     : `<div class="empty">${esc(empty)}</div>`;
-}
-$("#grid").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
-
-async function showLatest() {
-  if (!live) return;
-  try { renderGrid(await api("/api/browse?limit=48" + devParam()), "Latest captures"); } catch {}
 }
 const devParam = () => $("#dev").value ? "&device=" + encodeURIComponent($("#dev").value) : "";
 
@@ -225,13 +211,13 @@ async function refreshTimeline() {
 }
 $("#timeline").addEventListener("click", async e => {
   const b = e.target.closest(".bar"); if (!b) return;
-  if (b.classList.contains("sel")) { b.classList.remove("sel"); live = true; return showLatest(); }
   document.querySelectorAll(".bar.sel").forEach(x => x.classList.remove("sel"));
   b.classList.add("sel");
-  live = false;
   const s = +b.dataset.b;
-  const rows = await api(`/api/browse?start=${s}&end=${s + BUCKET}&device=${encodeURIComponent(b.dataset.d)}&limit=200`);
-  renderGrid(rows.reverse(), `${b.dataset.d} · ${fmt(s)} – ${fmt(s + BUCKET)}`);
+  try {
+    const rows = await api(`/api/browse?start=${s}&end=${s + BUCKET}&device=${encodeURIComponent(b.dataset.d)}&limit=200`);
+    showSources(rows.reverse(), [], `${fmt(s)} – ${fmt(s + BUCKET)}`);
+  } catch {}
 });
 
 // ---------- input: everything goes to the chat agent, which decides whether to search, answer or act ----------
@@ -245,7 +231,7 @@ function autosize() { const q = $("#q"); q.style.height = "auto"; q.style.height
 $("#go").onclick = run;
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); run(); } });
 $("#q").addEventListener("input", autosize);
-$("#dev").onchange = () => { showLatest(); refreshPromises(); };
+$("#dev").onchange = refreshPromises;
 
 // ---------- chat (POST /api/chat, streamed) ----------
 let messages = [];   // the whole conversation, sent to /api/chat every turn
@@ -267,7 +253,8 @@ function bubble(role, html) {
   return msg;
 }
 
-function showSources(items, cited = []) {
+function showSources(items, cited = [], title = "Sources") {
+  $("#sourcesTitle").textContent = title;
   const rows = [...items].sort((a, b) => cited.includes(b.id) - cited.includes(a.id));   // cited first, else keep rank
   $("#sources").innerHTML = rows.length ? rows.map(r => card(r, cited.includes(r.id))).join("") : NO_SOURCES;
 }
@@ -354,7 +341,7 @@ $("#newChat").onclick = () => {
   if (busy) return;
   messages = [];
   $("#thread").innerHTML = WELCOME;
-  $("#sources").innerHTML = NO_SOURCES;
+  showSources([]);
   $("#q").focus();
 };
 $("#thread").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
@@ -470,11 +457,10 @@ window.addEventListener("hashchange", route);
 route();
 
 // ---------- loop ----------
-refreshDevices(); refreshTimeline(); showLatest(); refreshPromises();
+refreshDevices(); refreshTimeline(); refreshPromises();
 setInterval(refreshDevices, 15000);
 setInterval(refreshPromises, 4000);
 setInterval(refreshTimeline, 15000);
-setInterval(showLatest, 5000);
 </script>
 </body>
 </html>
