@@ -49,8 +49,8 @@
   #sources { display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 150px); overflow-y: auto; }
   #sources .card { flex: none; }
   #sources .card img { aspect-ratio: 16/9; }
-  .cite { display: inline-block; background: var(--chip); color: var(--accent2); border-radius: 6px; padding: 0 6px;
-          font-family: var(--mono); font-size: 12px; cursor: pointer; }
+  .cite { display: inline-block; background: var(--chip); color: var(--accent2); border-radius: 6px; padding: 1px 8px;
+          font-family: var(--mono); font-size: 14px; cursor: pointer; }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
   .btn { background: var(--panel2); border: 1px solid var(--line); color: var(--text); border-radius: 8px;
          padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
@@ -97,7 +97,6 @@
   .kind { font-family: var(--mono); font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; margin-top: 3px; }
   .kind.deadline { color: var(--warn); border-color: var(--warn); }
   .kind.request { color: #60a5fa; border-color: #60a5fa; }
-  #standupBox { display: none; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--accent); border-radius: 10px; padding: 14px 16px; margin-top: 12px; font-size: 14px; }
   @media (max-width: 900px) { .chatwrap { grid-template-columns: 1fr; } }
   @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal img { border-radius: 12px 12px 0 0; } .stats { display: none; } }
 </style>
@@ -134,7 +133,6 @@
     </div>
   </div>
   <ul id="promises"><li class="empty">Nothing found yet — it shows up here within a minute of being on screen.</li></ul>
-  <div id="standupBox"></div>
 
   <h3>Timeline <span class="meta" id="tlhint">· click a bar to jump there</span></h3>
   <div id="timeline"></div>
@@ -160,6 +158,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const esc = s => (s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const md = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");   // models write **bold**; that's all we render
 const fmt = ts => new Date(ts * 1000).toLocaleString([], {weekday: "short", hour: "2-digit", minute: "2-digit"});
 let mode = "ask", live = true, busy = false;
 
@@ -205,24 +204,24 @@ function card(r, cited) {
       <div class="sum ${pend ? "pending" : ""}">${pend ? (r.status === "error" ? "indexing failed" : "indexing…") : esc(r.summary)}</div>
     </div></div>`;
 }
-function renderGrid(rows, title, citedIds = []) {
+function renderGrid(rows, title, citedIds = [], empty = "Nothing indexed yet. Start capturing and your screens show up here.") {
   $("#gridTitle").textContent = title;
   $("#grid").innerHTML = rows.length ? rows.map(r => card(r, citedIds.includes(r.id))).join("")
-                                     : `<div class="empty">Nothing yet.</div>`;
+                                     : `<div class="empty">${esc(empty)}</div>`;
 }
 $("#grid").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
 
 async function showLatest() {
   if (!live) return;
-  const rows = await api("/api/browse?limit=48" + devParam());
-  renderGrid(rows, "Latest captures");
+  try { renderGrid(await api("/api/browse?limit=48" + devParam()), "Latest captures"); } catch {}
 }
 const devParam = () => $("#dev").value ? "&device=" + encodeURIComponent($("#dev").value) : "";
 
 // ---------- timeline ----------
 const BUCKET = 600;
 async function refreshTimeline() {
-  const data = await api(`/api/timeline?bucket=${BUCKET}`);
+  let data;
+  try { data = await api(`/api/timeline?bucket=${BUCKET}`); } catch { return; }
   if (!data.length) { $("#timeline").innerHTML = `<div class="empty">No captures yet — start a capture agent.</div>`; return; }
   const min = Math.min(...data.map(d => d.b)), max = Math.max(...data.map(d => d.b));
   const nb = Math.min(Math.floor((max - min) / BUCKET) + 1, 400);
@@ -272,8 +271,10 @@ async function run() {
   if (mode === "search") {
     if (!q) { live = true; return showLatest(); }
     live = false;
-    const r = await api(`/api/search?q=${encodeURIComponent(q)}${devParam()}`);
-    renderGrid(r.results, `${r.results.length} results · ${r.ms} ms`);
+    try {
+      const r = await api(`/api/search?q=${encodeURIComponent(q)}${devParam()}`);
+      renderGrid(r.results, `${r.results.length} results · ${r.ms} ms`, [], `Nothing on your screens matched "${q}".`);
+    } catch { renderGrid([], "Search", [], "Search isn't reachable right now. Try again in a moment."); }
     return;
   }
   if (!q || busy) return;
@@ -293,7 +294,7 @@ const NO_SOURCES = `<div class="empty">The screenshots behind each answer show u
 const chip = id => `<span class="cite" data-id="${id}">#${id}</span>`;
 // [#9], #9 and a plain [9] become chips, but only for ids this answer actually retrieved
 const linkCites = (text, known) =>
-  esc(text).replace(/\[?#(\d+)\]?|\[(\d+)\]/g, (m, a, b) => known.has(+(a || b)) ? chip(a || b) : m);
+  md(text).replace(/\[?#(\d+)\]?|\[(\d+)\]/g, (m, a, b) => known.has(+(a || b)) ? chip(a || b) : m);
 const scrollThread = () => { const t = $("#thread"); t.scrollTop = t.scrollHeight; };
 
 function bubble(role, html) {
@@ -413,7 +414,7 @@ async function doDraft(kind, ids, target) {
   try {
     const r = await api("/api/draft", {method: "POST", headers: {"Content-Type": "application/json"},
                         body: JSON.stringify({ids, kind, instruction: lastQ ? `Context: the user asked "${lastQ}"` : ""})});
-    target.innerHTML = esc(r.draft) + `<div class="actions"><button class="btn copy">Copy</button></div>`;
+    target.innerHTML = md(r.draft) + `<div class="actions"><button class="btn copy">Copy</button></div>`;
     target.querySelector(".copy").onclick = () => navigator.clipboard.writeText(r.draft);
     return r.draft;
   } catch { target.textContent = "Couldn't write that draft just now. Try again in a moment."; }
@@ -452,28 +453,36 @@ async function refreshPromises() {
 $("#promises").addEventListener("click", async e => {
   const cite = e.target.closest(".cite"); if (cite) return openModal(+cite.dataset.id);
   if (e.target.type === "checkbox") {
-    const li = e.target.closest("li");
-    await api(`/api/commitments/${li.dataset.id}/done`, {method: "POST", headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({done: e.target.checked})});
-    li.classList.toggle("done", e.target.checked);
+    const li = e.target.closest("li"), box = e.target;
+    try {
+      await api(`/api/commitments/${li.dataset.id}/done`, {method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({done: box.checked})});
+      li.classList.toggle("done", box.checked);
+    } catch { box.checked = !box.checked; }
   }
 });
 document.addEventListener("click", async e => {
-  const b = e.target.closest("button[data-standup]"); if (!b) return;
-  const box = $("#standupBox");
-  box.style.display = "block";
-  box.innerHTML = `<span class="spin"></span> Reading today's activity log on-device…`;
+  const b = e.target.closest("button[data-standup]"); if (!b || busy) return;
+  const ask = b.textContent;
+  window.scrollTo({top: 0, behavior: "smooth"});
+  bubble("user", esc(ask));
+  const box = bubble("bot", `<span class="hint"><span class="spin"></span> Reading today's activity log on-device…</span>`).querySelector(".text");
+  busy = true;
   try {
     const r = await api(`/api/standup?kind=${b.dataset.standup}${devParam()}`);
-    box.innerHTML = esc(r.text) + `<div class="actions"><button class="btn" id="copyStandup">Copy</button>` +
+    box.innerHTML = md(r.text) + `<div class="actions"><button class="btn copy">Copy</button>` +
       `<span class="meta">${r.spans ?? 0} activity spans · ${r.captures ?? 0} captures · ${r.ms} ms</span></div>`;
-    box.querySelector("#copyStandup").onclick = () => navigator.clipboard.writeText(r.text);
-  } catch (err) { box.textContent = "Error: " + err.message; }
+    box.querySelector(".copy").onclick = () => navigator.clipboard.writeText(r.text);
+    messages.push({role: "user", content: ask}, {role: "assistant", content: r.text});
+  } catch {
+    box.innerHTML = `<span class="hint">Couldn't read today's activity just now. Try again in a moment.</span>`;
+  } finally { busy = false; scrollThread(); }
 });
 
 // ---------- modal ----------
 async function openModal(id) {
-  const r = await api("/api/capture/" + id);
+  let r;
+  try { r = await api("/api/capture/" + id); } catch { return console.warn("capture not found:", id); }
   $("#modal").dataset.id = id;
   $("#mImg").src = "/img/" + id;
   $("#mMeta").innerHTML = `#${r.id} · ${fmt(r.ts)} · ${esc(r.device)}<br>${esc(r.app)} — ${esc(r.title)}`;
@@ -485,6 +494,20 @@ async function openModal(id) {
 }
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal") $("#modal").style.display = "none"; });
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("#modal").style.display = "none"; });
+
+// ---------- deep links (Lane 1 opens these) ----------
+function route() {
+  const h = location.hash;
+  let m;
+  if ((m = h.match(/^#\/capture\/(\d+)/))) openModal(+m[1]);
+  else if ((m = h.match(/^#\/chat\?(.*)$/))) {
+    const q = new URLSearchParams(m[1]).get("q")?.trim();
+    if (q) { setMode("ask"); busy ? ($("#q").value = q) : sendChat(q); }
+  } else return;
+  history.replaceState(null, "", location.pathname);   // so the same link works twice and a reload doesn't re-ask
+}
+window.addEventListener("hashchange", route);
+route();
 
 // ---------- loop ----------
 refreshHealth().then(refreshStats); refreshTimeline(); showLatest(); refreshPromises();
