@@ -21,6 +21,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+import httpx
+
 import memory
 import models
 
@@ -92,46 +94,195 @@ def _diverse(rows, per_window=2):
 
 # ---------- background commitment extraction (runs beside the vision pass) ----------
 EXTRACT_ENABLED = os.environ.get("EXTRACT_ENABLED", "1") == "1"
-EXTRACT_CONCURRENCY = int(os.environ.get("EXTRACT_CONCURRENCY", "4"))
+EXTRACT_CONCURRENCY = int(os.environ.get("EXTRACT_CONCURRENCY", "2"))
+EXTRACT_SETTLE_S = float(os.environ.get("EXTRACT_SETTLE_S", "8"))       # a frame must stay on screen this long
+EXTRACT_THREAD_HOURS = float(os.environ.get("EXTRACT_THREAD_HOURS", "6"))  # open items of a thread to re-check
 
-EXTRACT_SYSTEM = """You read text captured from one person's computer screen and pull out COMMITMENTS:
-- promise: something the person said they will do ("I'll send the deck by Friday", "will follow up tomorrow")
-- deadline: a due date or time that applies to them ("due Oct 30", "submission closes Sun 1:30 PM")
-- request: something someone else asked them to do that is still open ("can you review the redline?")
-Return ONLY a JSON array, no prose. Each item: {"kind": "promise"|"deadline"|"request", "text": "<one specific line, keep names/numbers/dates>", "who": "<who owes it: 'me' or a name>", "due": "<date/time as written, or ''>"}
-Rules: only concrete actions or dates; skip menus, navigation, ads, boilerplate, code, and anything marked done. At most 4 items. If nothing qualifies, return []."""
+EXTRACT_SYSTEM = """You keep the list of COMMITMENTS seen in one window of the user's screen up to date (a chat, an email, a document or a web page). "Me" is the user.
+- promise: something someone said they will do ("I'll send the deck by Friday")
+- request: something someone asked someone else to do that is still open ("can you review the redline?")
+- deadline: a due date or time ("due Oct 30", "submission closes Sun 1:30 PM")
+owner = who has to do it: "me" (the user) or "them" (anyone else).
+
+You get the items already OPEN in this window (with ids), items recently CLOSED, and its current SCREEN TEXT (sent and received messages and other visible text; unsent drafts are removed).
+Return ONLY a JSON object, no prose:
+{"new": [{"kind": "promise"|"request"|"deadline", "text": "<one specific line, keep names/numbers/dates>", "owner": "me"|"them", "due": "<as written, or ''>"}],
+ "updates": [{"id": <id of an OPEN item>, "status": "cancelled"|"changed"|"done", "new_text": "<for changed: the new version, else ''>", "reason": "<short, quote the message>"}]}
+Rules:
+- A LATER message that retracts ("actually nevermind", "no need"), declines ("I can't"), reassigns ("Sam will do it instead") or says it's handled ("I've got it", "already done") updates the OPEN item it refers to: cancelled if it no longer has to happen, changed if it still happens differently (new owner, date or details: put the new version in new_text), done if its owner says it is done.
+- Watch who speaks. Whoever says "nevermind, I'll do it" / "I've got it" takes the task over: cancel the open item. Only when the speaker is Me AND the item was owned by "them", also add the task to "new" with owner "me".
+- Thanks, ok, sounds good, emoji and other acknowledgements change NOTHING. "done" only when the owner says the task itself is finished ("sent it").
+- Every NEW commitment in the screen text goes in "new", whoever owes it: a question asking someone to do something is a request; "I'll ..." / "will do X by ..." is a promise. Owner is who must DO it: a request someone makes to Me -> "me"; a request Me makes ("Me: can you ...?") -> "them"; a promise -> whoever promised.
+Examples with no OPEN items:
+  "Alex: can you send the deck to Sarah by Friday?" -> {"new": [{"kind": "request", "text": "Send the deck to Sarah", "owner": "me", "due": "Friday"}], "updates": []}
+  "Me: can you review the redline?" "Priya: sure, I'll get it back to you by Wednesday" -> {"new": [{"kind": "promise", "text": "Priya returns the reviewed redline", "owner": "them", "due": "Wednesday"}], "updates": []}
+  "Invoice #4471 from ASUS  due Oct 30  $1,250.00" -> {"new": [{"kind": "deadline", "text": "Pay ASUS invoice #4471 ($1,250.00)", "owner": "me", "due": "Oct 30"}], "updates": []}
+Examples with an OPEN item, then the latest messages:
+  id=7 [request, owner me] Send the deck. "Alex: nevermind, I've got it" -> {"new": [], "updates": [{"id": 7, "status": "cancelled", "new_text": "", "reason": "Alex: nevermind, I've got it"}]}
+  id=7 [request, owner them] Alex to send the deck. "Me: nevermind, I'll do it" -> {"new": [{"kind": "promise", "text": "Send the deck", "owner": "me", "due": ""}], "updates": [{"id": 7, "status": "cancelled", "new_text": "", "reason": "Me: nevermind, I'll do it"}]}
+  id=7 [request, owner me] Send the deck. "Alex: thanks!" -> {"new": [], "updates": []}
+- Never put an OPEN or CLOSED item in "new" again, even reworded, unless a newer message clearly asks for it again.
+- Ignore text that is only typed and not sent, and anything the summary describes as being typed or drafted.
+- Only concrete actions and dates; skip menus, navigation, ads, boilerplate and code. At most 4 new items.
+- Nothing to add or change: {"new": [], "updates": []}"""
 
 
-def _parse_items(text: str) -> list[dict]:
-    text = text or ""
-    i, j = text.find("["), text.rfind("]")
-    if i < 0 or j <= i:
-        return []
-    try:
-        data = json.loads(text[i:j + 1])
-    except json.JSONDecodeError:
-        return []
-    out = []
-    for it in data if isinstance(data, list) else []:
+# Nemotron sometimes "cancels" an item because of a plain acknowledgement; its reason quotes the message, so drop those
+_ACK = re.compile(r"(?:thanks?(?: you)?|thx|ty|ok(?:ay)?|k|sounds good|great|cool|perfect|awesome|nice|got it|will do"
+                  r"|noted|sure|yes|yep|[\U0001F44D\U0001F64F\u2764\uFE0F]+)[\s!.]*", re.I)
+
+
+def _is_ack(reason: str) -> bool:
+    msg = re.sub(r"^[\w .'-]{1,30}:\s*", "", reason.strip().strip('"\'')).strip().strip('"\'')
+    msg = re.sub(r"^\w+ said\s+", "", msg).strip('"\' ')
+    return bool(_ACK.fullmatch(msg))
+
+
+def _on_screen(reason: str, screen: str) -> bool:
+    """The message an update quotes must really be on screen (Nemotron sometimes copies a prompt example instead)."""
+    quoted = re.findall(r'"([^"]{3,})"', reason) or [re.sub(r"^[\w .'-]{1,30}:\s*", "", reason.strip())]
+    have = set(re.findall(r"[a-z0-9']+", screen.lower()))
+    for q in quoted:
+        words = set(re.findall(r"[a-z0-9']+", q.lower()))
+        if words and len(words & have) / len(words) >= 0.6:
+            return True
+    return False
+
+
+def _asked_by_me(request: str, screen: str) -> bool:
+    """Is this request one the user made? The vision model writes the user's own messages as "Me: ...", and
+    Nemotron often files "Me: can you review the redline?" as owner me even with that exact prompt example.
+    Find the screen line that best matches the request; True when its speaker is Me."""
+    words = set(re.findall(r"[a-z0-9']+", request.lower())) - _STOP
+    best, speaker = 0.0, ""
+    for line in screen.splitlines():
+        m = re.match(r"^\s*([\w .'-]{1,30}):\s*(.+)$", line)
+        if not m or not words:
+            continue
+        overlap = len(words & set(re.findall(r"[a-z0-9']+", m.group(2).lower()))) / len(words)
+        if overlap > best:
+            best, speaker = overlap, m.group(1).strip().lower()
+    return best >= 0.6 and speaker == "me"
+
+
+_STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "by", "on", "in", "at", "my", "your", "you", "me",
+         "can", "could", "please", "will", "i'll", "it", "this", "that"}
+
+
+def _parse_extract(text: str, open_ids: set[int], screen: str | None = None) -> tuple[list[dict], list[dict]]:
+    """(new items, updates) from the model's JSON. Raises ValueError when there's no usable JSON, so the capture
+    is retried rather than silently marked done. A bare JSON array (the old format) counts as new items."""
+    text = models._strip_think(text or "")
+    for i, j in ((text.find("{"), text.rfind("}")), (text.find("["), text.rfind("]"))):
+        if 0 <= i < j:
+            try:   # a complete object followed by junk (a stray "}" or prose) parses on its own
+                data = json.JSONDecoder().raw_decode(text[i:])[0]
+                break
+            except json.JSONDecodeError:
+                pass
+            # models sometimes stop before the last brackets: try closing them
+            for tail in ("", "]}", "}", "]", "}]}"):
+                try:
+                    data = json.loads(text[i:j + 1] + tail)
+                    break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                continue
+            break
+    else:
+        raise ValueError(f"no JSON in extractor output: {text[:120]!r}")
+    if isinstance(data, list):
+        data = {"new": data, "updates": []}
+    if not isinstance(data, dict):
+        raise ValueError(f"unexpected JSON: {text[:120]!r}")
+    new = []
+    for it in data.get("new") or []:
         if isinstance(it, dict) and isinstance(it.get("text"), str) and it["text"].strip():
-            out.append(it)
-    return out[:4]
+            kind = it.get("kind") if it.get("kind") in ("promise", "request", "deadline") else "promise"
+            owner = str(it.get("owner") or it.get("who") or "me").strip().lower()
+            if kind == "request" and owner == "me" and screen and _asked_by_me(it["text"], screen):
+                owner = "them"   # the user asked someone else, so it's theirs to do
+            new.append({"kind": kind, "text": it["text"], "who": "me" if owner == "me" else "them",
+                        "due": str(it.get("due") or "")})
+    updates = []
+    for u in data.get("updates") or []:
+        try:
+            cid = int(u.get("id"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        reason = str(u.get("reason") or "")
+        if (cid in open_ids and u.get("status") in ("cancelled", "changed", "done") and not _is_ack(reason)
+                and (screen is None or _on_screen(reason, screen))):
+            updates.append({"id": cid, "status": u["status"], "reason": reason[:200],
+                            "new_text": str(u.get("new_text") or "").strip()})
+    return new[:4], updates
+
+
+def _item_line(c):
+    return (f"- id={c['id']} [{c['kind']}, owner {c['who'] or 'me'}] {c['text']}" + (f" (due {c['due']})" if c["due"] else "")
+            + (f" -> {c['status']}: {c['status_reason']}" if c.get("status") not in (None, "active") else ""))
+
+
+# Foreground model calls (ask, chat, drafts, standups) pause the extractor so it never starves them:
+# no new extraction call starts while one is running or for a moment after (between agent tool rounds).
+_fg = {"n": 0, "last": 0.0}
+
+
+class _foreground:
+    async def __aenter__(self):
+        _fg["n"] += 1
+
+    async def __aexit__(self, *exc):
+        _fg["n"] -= 1
+        _fg["last"] = time.time()
+
+
+async def _wait_for_foreground():
+    while _fg["n"] or time.time() - _fg["last"] < 1.5:
+        await asyncio.sleep(0.2)
+
+
+_thread_locks: dict[str, asyncio.Lock] = {}
 
 
 async def extract_one(row, sem):
-    async with sem:
+    key = memory.thread_key(row["app"], row["title"])
+    lock = _thread_locks.setdefault(key, asyncio.Lock())
+    async with lock, sem:   # one capture per thread at a time, in claim (= time) order
         try:
-            user = (f"Screen capture to scan for commitments.\n"
-                    f"App: {row['app']} — {row['title']}\nSeen: {_fmt_time(row['ts'])}\n"
-                    f"Summary: {row['summary']}\nScreen text:\n{(row['ocr'] or '')[:1500]}")
-            out = await models.chat(EXTRACT_SYSTEM, user, max_tokens=300, temperature=0)
-            added = memory.add_commitments(row, _parse_items(out))
-            memory.store.mark_extracted(row["id"], ok=True)
-            for a in added:
+            sent, _draft = models.split_draft(row["ocr"] or "")
+            sent = sent.strip()
+            last = memory.store.thread_text(key)
+            if last is not None and (sent == last or memory.store_similar(sent, last, 0.9)):
+                memory.store.mark_extracted(row["id"], ok=True)   # same conversation text as last time: no call
+                return
+            since = row["ts"] - EXTRACT_THREAD_HOURS * 3600
+            open_items = memory.thread_commitments(key, since)
+            closed = memory.thread_commitments(key, since, ("cancelled", "changed", "done"), limit=10)
+            user = (f"Conversation: {row['app']} — {row['title']}\nSeen: {_fmt_time(row['ts'])}\n\n"
+                    f"OPEN ITEMS\n{chr(10).join(map(_item_line, open_items)) or '(none)'}\n\n"
+                    f"CLOSED ITEMS\n{chr(10).join(map(_item_line, closed)) or '(none)'}\n\n"
+                    f"Summary: {row['summary']}\n\nSCREEN TEXT\n{sent[:1500]}")
+            await _wait_for_foreground()
+            out = await models.chat(EXTRACT_SYSTEM, user, max_tokens=400, temperature=0)
+            new, updates = _parse_extract(out, {c["id"] for c in open_items}, sent)
+            by_id = {c["id"]: c for c in open_items}
+            for u in updates:
+                if memory.set_commitment_status(u["id"], u["status"], u["reason"], row["id"], row["ts"]):
+                    print(f"commitment {u['id']} {u['status']} by #{row['id']}: {u['reason']}")
+                    if u["status"] == "changed" and u["new_text"]:
+                        old = by_id[u["id"]]
+                        new.append({"kind": old["kind"], "text": u["new_text"], "who": old["who"], "due": old["due"]})
+            for a in memory.add_commitments(row, new):
                 print(f"promise found in #{row['id']}: {a['text']}")
-        except Exception as e:
-            print(f"extract error id={row['id']}: {e!r}")
-            memory.store.mark_extracted(row["id"], ok=True)  # don't retry forever; the capture is still searchable
+            memory.store.set_thread_text(key, sent, row["id"], row["ts"])
+            memory.store.mark_extracted(row["id"], ok=True)
+        except httpx.TransportError as e:   # GX10 unreachable: retry later without using up an attempt
+            memory.store.extract_failed(row["id"], repr(e), count=False)
+            await asyncio.sleep(5)
+        except Exception as e:              # bad JSON, HTTP error...: retry, give up after a few attempts
+            memory.store.extract_failed(row["id"], repr(e))
 
 
 async def _warmup():
@@ -151,7 +302,7 @@ async def extractor():
     inflight: set[asyncio.Task] = set()
     while True:
         free = EXTRACT_CONCURRENCY * 2 - len(inflight)
-        rows = memory.store.claim_extract(free) if free > 0 else []
+        rows = memory.store.claim_extract(free, settle_s=EXTRACT_SETTLE_S) if free > 0 else []
         for r in rows:
             t = asyncio.create_task(extract_one(r, sem))
             inflight.add(t)
@@ -197,7 +348,8 @@ async def ask(req: AskReq):
     if len(ctx) + len(act) > ASK_MAX_CHARS:  # detailed captures matter more than the log's tail
         act = act[:max(2000, ASK_MAX_CHARS - len(ctx))] + "\n(... log truncated)"
     user = f"ACTIVITY LOG\n{act}\n\nDETAILED CAPTURES\n\n{ctx}\n\nQuestion: {req.q}"
-    answer = await models.chat(system, user, max_tokens=ASK_MAX_TOKENS)
+    async with _foreground():
+        answer = await models.chat(system, user, max_tokens=ASK_MAX_TOKENS)
     if not answer.strip():  # a reasoning model that spent its whole budget thinking
         answer = "The model returned an empty answer (likely reasoning mode). Check LLM_NO_THINK / context length."
     cited = list(dict.fromkeys(int(x) for x in re.findall(r"#(\d+)", answer)))
@@ -363,7 +515,9 @@ async def _run_tool(name, args, device, sources):
             return "No commitments found."
         keep(memory.many(list(dict.fromkeys(c["capture_id"] for c in items))))
         return "\n".join(f"[#{c['capture_id']}] {_fmt_time(c['ts'])} · {c['kind']} · {c['who']}: {c['text']}"
-                         + (f" (due {c['due']})" if c["due"] else "") + (" [done]" if c["done"] else "")
+                         + (f" (due {c['due']})" if c["due"] else "")
+                         + (f" [{c['status']}: {c['status_reason']}]" if c["status"] not in ("active", "done")
+                            else " [done]" if c["done"] else "")
                          for c in items[:40])
     if name == "draft":
         ids = [int(i) for i in (args.get("ids") or [])][:12]
@@ -453,7 +607,8 @@ async def _agent(req: ChatReq):
         last = rnd == CHAT_MAX_ROUNDS
         if last:  # out of tool rounds: force an answer from what was found
             msgs.append({"role": "user", "content": "Answer now using only the tool results above."})
-        out = await _chat_messages(msgs, None if last else TOOLS, CHAT_MAX_TOKENS, 0.1)
+        async with _foreground():
+            out = await _chat_messages(msgs, None if last else TOOLS, CHAT_MAX_TOKENS, 0.1)
         calls = out.get("tool_calls") or []
         if not calls:
             answer = (out.get("content") or "").strip()
@@ -616,8 +771,9 @@ async def _draft_text(rows, kind, instruction=""):
     """Shared by /api/draft and the chat agent's draft tool."""
     user = f"Screen captures:\n\n{_context(rows, 1500)}\n\n"
     user += f"Instruction: {instruction}" if instruction else "Write the draft."
-    return await models.chat(DRAFT_SYSTEM.format(kind=DRAFT_KINDS.get(kind, DRAFT_KINDS["email"])),
-                             user, max_tokens=900, temperature=0.4)
+    async with _foreground():
+        return await models.chat(DRAFT_SYSTEM.format(kind=DRAFT_KINDS.get(kind, DRAFT_KINDS["email"])),
+                                 user, max_tokens=900, temperature=0.4)
 
 
 # ---------- things you promised + standup / timesheet ----------
@@ -669,7 +825,8 @@ async def standup(kind: str = "standup", device: str | None = None, hours: float
                       for c in commits) or "(none found)"
     user = (f"ACTIVITY LOG\n{_activity_text(spans, omitted, total)[:ASK_MAX_CHARS]}\n\n"
             f"OPEN COMMITMENTS\n{clist}\n\nPeriod: {_fmt_time(start)} to {_fmt_time(end)}.")
-    text = await models.chat(STANDUP_SYSTEM.format(kind=STANDUP_KINDS.get(kind, STANDUP_KINDS["standup"])),
-                             user, max_tokens=600, temperature=0.3)
+    async with _foreground():
+        text = await models.chat(STANDUP_SYSTEM.format(kind=STANDUP_KINDS.get(kind, STANDUP_KINDS["standup"])),
+                                 user, max_tokens=600, temperature=0.3)
     return {"text": text, "kind": kind, "spans": len(spans), "captures": total,
             "ms": round((time.time() - t0) * 1000)}

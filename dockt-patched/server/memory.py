@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 
 import models
-from store import Store
+from store import Store, thread_key
+from store import _similar as store_similar
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(Path.home() / ".dockt" / "data"))).resolve()
 IMG_DIR = DATA_DIR / "img"
@@ -38,3 +39,5 @@ activity = store.activity
 commitments = store.commitments
 add_commitments = store.add_commitments
 set_commitment_done = store.set_commitment_done
+set_commitment_status = store.set_commitment_status
+thread_commitments = store.thread_commitments
