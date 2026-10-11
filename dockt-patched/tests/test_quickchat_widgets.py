@@ -167,11 +167,16 @@ class QuickChatWidgetTests(unittest.TestCase):
             root.update()
             show.assert_called_once_with()
 
-        with patch.object(app, "_pet_menu") as show_options:
+        with patch.object(app, "_toggle_voice") as voice, patch.object(app, "_show_options_at") as show_options:
             app.pet_canvas.event_generate("<ButtonPress-1>", x=96, y=124)
             app.pet_canvas.event_generate("<ButtonRelease-1>", x=96, y=124)
             root.update()
+            voice.assert_called_once_with()
+            show_options.assert_not_called()
+            app.pet_canvas.event_generate("<Button-3>", x=80, y=70)   # options are on right-click
+            root.update()
             show_options.assert_called_once()
+        app._pet_hint(True)   # opening the menu hides the controls; hovering the pet again brings them back
 
         app.pet_canvas.event_generate("<Motion>", x=64, y=124)
         root.update()
@@ -234,3 +239,54 @@ class QuickChatWidgetTests(unittest.TestCase):
         widget = app.transcript.markdown_widgets[0]
         self.assertIn("citation_2", widget.tag_names("1.10"))
         self.assertIn("Saved in #2.", widget.get("1.0", "end-1c"))
+
+    def test_pet_mic_records_then_fills_the_quick_chat_without_sending(self):
+        root, app = self.make_app(96/72)
+        app.hide()
+        app.pet.geometry("160x140+10000+10000")
+        app.pet.deiconify()
+        root.update()
+        recorder = Mock()
+        recorder.stop.return_value = b"RIFF-wav"
+        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
+            app._pet_hint(True)
+            for _ in range(2):   # click the mic to start, click again to stop
+                app.pet_canvas.event_generate("<ButtonPress-1>", x=96, y=124)
+                app.pet_canvas.event_generate("<ButtonRelease-1>", x=96, y=124)
+                root.update()
+                if app.voice_state == "recording":
+                    recorder.start.assert_called_once_with()
+                    self.assertEqual(app.pet_notice, "Listening…")
+                    app._pet_hint(False)
+                    self.assertTrue(app.pet_hint_visible, "the stop button stays visible while recording")
+            for _ in range(50):
+                root.update()
+                if app.voice_state == "idle":
+                    break
+                time.sleep(0.02)
+        upload.assert_called_once_with(b"RIFF-wav")
+        self.assertEqual(app.voice_state, "idle")
+        self.assertEqual(app.chat.state(), "normal", "the quick chat opens with the words in it")
+        self.assertEqual(app.entry.get("1.0", "end-1c"), "where is dinner tonight")
+        self.assertFalse(app.placeholder_visible)
+        self.assertEqual(app.messages, [], "voice fills the box; Enter sends it")
+
+    def test_pet_mic_failure_shows_a_short_notice(self):
+        root, app = self.make_app(96/72)
+        app.hide()
+        root.update()
+        recorder = Mock()
+        recorder.stop.return_value = b"RIFF-wav"
+        error = quickchat.VoiceError("Voice isn't set up", "Voice input isn't set up on this Dockt yet.")
+        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", side_effect=error):
+            app._toggle_voice()
+            app._toggle_voice()
+            for _ in range(50):
+                root.update()
+                if app.voice_state == "idle":
+                    break
+                time.sleep(0.02)
+        self.assertEqual(app.pet_notice, "Voice isn't set up")
+        self.assertEqual(app.status.get(), "Voice input isn't set up on this Dockt yet.")
+        self.assertEqual(app.chat.state(), "withdrawn", "nothing to show in the chat")
+
