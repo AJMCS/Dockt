@@ -330,6 +330,29 @@ class QuickChatTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["args"][1], app.retry_payload)
         thread.start.assert_called_once_with()
 
+    def test_history_poll_skips_a_new_unsaved_conversation(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app.history_ts = 0
+        app.history_loading = False
+        app.busy = False
+        app.conversation_id = "new-conversation"
+        app.chat = Mock()
+        app.chat.state.return_value = "normal"
+        app.root = Mock()
+        app.events = __import__("queue").Queue()
+
+        with patch.object(quickchat.threading, "Thread") as thread:
+            app._poll_shared_history()
+        thread.assert_not_called()
+        app.root.after.assert_called_once_with(3000, app._poll_shared_history)
+
+        app.history_ts = 1
+        worker = Mock()
+        with patch.object(quickchat.threading, "Thread", return_value=worker) as thread:
+            app._poll_shared_history()
+        thread.assert_called_once()
+        worker.start.assert_called_once_with()
+
     def test_placeholder_is_not_submitted_as_a_user_question(self):
         app = quickchat.QuickChat.__new__(quickchat.QuickChat)
         app.placeholder_visible = True

@@ -141,3 +141,25 @@ class QuickChatWidgetTests(unittest.TestCase):
             rows[1].event_generate("<Button-1>", x=8, y=8)
             root.update()
             show_options.assert_called_once()
+
+    def test_opening_chat_does_not_repeat_focus_for_child_map_events(self):
+        root, app = self.make_app(96/72)
+        app.hide()
+        root.update()
+        focus_calls = []
+        focus_entry = app._focus_entry
+
+        def count_focus(*args, **kwargs):
+            focus_calls.append(None)
+            return focus_entry(*args, **kwargs)
+
+        with patch.object(app, "_focus_entry", side_effect=count_focus):
+            app.show()
+            deadline = time.monotonic() + 0.4
+            while time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.01)
+
+        self.assertEqual(app.chat.state(), "normal")
+        self.assertGreaterEqual(len(focus_calls), 1)
+        self.assertLessEqual(len(focus_calls), 2)

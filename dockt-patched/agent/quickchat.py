@@ -269,7 +269,6 @@ class QuickChat:
         self._style()
         self._build()
         self._create_pet()
-        self.chat.bind("<Map>", self._chat_mapped, add="+")
         self.root.after(80, self._drain_events)
         self.root.after(1000, self._poll_shared_history)
 
@@ -700,7 +699,11 @@ class QuickChat:
         self.chat.after(120, self._focus_entry_if_unfocused)
 
     def _poll_shared_history(self):
-        if not self.busy and not self.history_loading and self.chat.state() != "withdrawn":
+        # A fresh chat gets a UUID before it has a saved row. Polling that
+        # nonexistent conversation every 3 s produces a stream of 404s until
+        # the first message is stored.
+        if (self.history_ts > 0 and not self.busy and not self.history_loading and
+                self.chat.state() != "withdrawn"):
             self.history_loading = True
             cid = self.conversation_id
 
@@ -709,10 +712,6 @@ class QuickChat:
 
             threading.Thread(target=fetch, daemon=True).start()
         self.root.after(3000, self._poll_shared_history)
-
-    def _chat_mapped(self, _event=None):
-        if self.chat.state() != "withdrawn":
-            self.chat.after_idle(self._focus_entry)
 
     def _entry_clicked(self, _event=None):
         # Let Tk place the insertion cursor from the click before raising/focusing.
@@ -728,7 +727,8 @@ class QuickChat:
     def _focus_entry(self, move_cursor: bool = True):
         if self.chat.state() == "withdrawn":
             return
-        self.chat.deiconify()
+        # show() maps and raises the window before scheduling this focus helper.
+        # Keep this method from remapping an already visible CTkToplevel.
         self.chat.lift()
         if os.name == "nt":
             try:
