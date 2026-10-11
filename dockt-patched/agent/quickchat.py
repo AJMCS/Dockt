@@ -15,14 +15,16 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 import webbrowser
 
 from PIL import Image, ImageTk
 
 BASE_URL = os.environ.get("DOCKT_URL", "http://127.0.0.1:8000").rstrip("/")
+DESKTOP_CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
 HOTKEY_ID = 1
+COMPOSER_PLACEHOLDER = "Ask anything you saw…"
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 MOD_CONTROL = 0x0002
@@ -78,7 +80,53 @@ def _edge_path() -> str | None:
     return None
 
 
+def _focus_windows_entry(chat_hwnd: int, entry_hwnd: int, user32=None, kernel32=None) -> None:
+    """Raise the owning chat window and give its input control keyboard focus."""
+    user32 = user32 or ctypes.windll.user32
+    kernel32 = kernel32 or ctypes.windll.kernel32
+    hwnd = wintypes.HWND(chat_hwnd)
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    hwnd = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT
+    user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    foreground = user32.GetForegroundWindow()
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND,
+                                                ctypes.POINTER(wintypes.DWORD))
+    foreground_thread = user32.GetWindowThreadProcessId(foreground, None)
+    current_thread = kernel32.GetCurrentThreadId()
+    user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+    user32.BringWindowToTop.argtypes = (wintypes.HWND,)
+    user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+    user32.SetActiveWindow.argtypes = (wintypes.HWND,)
+    user32.SetFocus.argtypes = (wintypes.HWND,)
+
+    attached = bool(foreground_thread and foreground_thread != current_thread and
+                    user32.AttachThreadInput(current_thread, foreground_thread, True))
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetActiveWindow(hwnd)
+        user32.SetFocus(wintypes.HWND(entry_hwnd))
+    finally:
+        if attached:
+            user32.AttachThreadInput(current_thread, foreground_thread, False)
+
+
 def open_dockt(path: str = "") -> None:
+    # The native desktop shell owns one window and exposes a local hand-off endpoint.
+    # Prefer it so citations and "Open in Dockt" don't spawn duplicate Edge windows.
+    try:
+        query = urlencode({"hash": path})
+        with urlopen(f"http://127.0.0.1:{DESKTOP_CONTROL_PORT}/open?{query}", timeout=1) as response:
+            if response.status == 200:
+                return
+    except (HTTPError, URLError, TimeoutError, OSError):
+        pass
+
     url = BASE_URL + path
     edge = _edge_path()
     if edge:
@@ -158,7 +206,7 @@ class QuickChat:
         self.chat = tk.Toplevel(self.root)
         self.chat.title("Dockt Quick Chat")
         self.chat.geometry("560x420")
-        self.chat.minsize(460, 360)
+        self.chat.minsize(480, 360)
         self.chat.attributes("-topmost", True)
         self.chat.withdraw()
         self.chat.protocol("WM_DELETE_WINDOW", self.hide)
@@ -192,10 +240,6 @@ class QuickChat:
                         font=("Segoe UI", 11))
         style.configure("Muted.TLabel", background=colors["bg"], foreground=colors["muted"],
                         font=("Segoe UI", 10))
-        style.configure("TEntry", fieldbackground=colors["surface"], foreground=colors["text"],
-                        insertcolor=colors["text"], bordercolor=colors["line"], padding=10,
-                        font=("Segoe UI", 11))
-        style.map("TEntry", bordercolor=[("focus", colors["accent"])])
         style.configure("TButton", background=colors["surface2"], foreground=colors["text"],
                         bordercolor=colors["line"], padding=(10, 7), font=("Segoe UI", 10))
         style.map("TButton", background=[("active", colors["line"])])
@@ -203,9 +247,14 @@ class QuickChat:
                         foreground=colors["on_accent"], bordercolor=colors["accent"],
                         padding=(12, 8), font=("Segoe UI", 10, "bold"))
         style.map("Accent.TButton", background=[("active", "#6AA600")])
+        style.configure("Citation.TButton", background=colors["accent_soft"],
+                        foreground=colors["accent_text"], bordercolor=colors["accent_soft"],
+                        padding=(5, 2), font=("Segoe UI", 9, "bold"))
+        style.map("Citation.TButton", background=[("active", colors["accent"])],
+                  foreground=[("active", colors["on_accent"])])
 
     def _build(self):
-        frame = ttk.Frame(self.chat, padding=18)
+        frame = ttk.Frame(self.chat, padding=(20, 18, 20, 16))
         frame.pack(fill="both", expand=True)
         header = ttk.Frame(frame)
         header.pack(fill="x")
@@ -215,22 +264,31 @@ class QuickChat:
                   font=("Segoe UI", 20, "bold")).pack(side="left")
         ttk.Label(brand, text=".", foreground=self.colors["accent"],
                   font=("Segoe UI", 20, "bold")).pack(side="left")
-        ttk.Label(header, text="QUICK CHAT  |  CTRL+SPACE", style="Muted.TLabel").pack(
+        ttk.Label(header, text="Quick chat", style="Muted.TLabel").pack(
             side="left", padx=(12, 0), pady=(7, 0))
+        ttk.Label(header, text="Ctrl+Space", style="Muted.TLabel").pack(
+            side="right", pady=(7, 0))
 
         self.transcript = tk.Text(frame, wrap="word", height=11, state="disabled",
-                                  bg=self.colors["surface"], fg=self.colors["text"],
+                                  bg=self.colors["bg"], fg=self.colors["text"],
                                   insertbackground=self.colors["text"],
-                                  relief="flat", padx=14, pady=12, font=("Georgia", 12),
-                                  spacing1=3, spacing3=8, highlightthickness=1,
-                                  highlightbackground=self.colors["line"],
-                                  highlightcolor=self.colors["accent"])
-        self.transcript.pack(fill="both", expand=True, pady=(14, 8))
+                                  relief="flat", padx=2, pady=10, font=("Georgia", 13),
+                                  spacing1=2, spacing3=10, highlightthickness=0,
+                                  takefocus=False)
+        self.transcript.pack(fill="both", expand=True, pady=(12, 8))
         self.transcript.tag_configure("user", foreground=self.colors["text"],
+                                      font=("Segoe UI", 10, "bold"), justify="right",
+                                      spacing1=10)
+        self.transcript.tag_configure("user_body", foreground=self.colors["text"],
                                       background=self.colors["surface2"],
-                                      font=("Segoe UI", 11, "bold"))
+                                      font=("Segoe UI", 11), justify="right",
+                                      lmargin1=72, lmargin2=72, rmargin=4,
+                                      spacing1=3, spacing3=12)
         self.transcript.tag_configure("assistant", foreground=self.colors["accent_text"],
-                                      font=("Segoe UI", 11, "bold"))
+                                      font=("Segoe UI", 10, "bold"), spacing1=8)
+        self.transcript.tag_configure("assistant_body", foreground=self.colors["text"],
+                                      font=("Georgia", 13), lmargin1=2, lmargin2=2,
+                                      rmargin=28, spacing1=2, spacing3=10)
         self.transcript.tag_configure("error", foreground=self.colors["error"])
 
         self.thumbnail_row = ttk.Frame(frame)
@@ -238,18 +296,33 @@ class QuickChat:
 
         composer = ttk.Frame(frame)
         composer.pack(fill="x")
-        self.question = tk.StringVar()
-        self.entry = ttk.Entry(composer, textvariable=self.question, takefocus=True)
+        self.entry = tk.Text(composer, height=1, wrap="word", takefocus=True,
+                             bg=self.colors["surface"], fg=self.colors["text"],
+                             insertbackground=self.colors["text"],
+                             highlightthickness=1, highlightbackground=self.colors["line"],
+                             highlightcolor=self.colors["accent"], relief="flat",
+                             padx=12, pady=9, font=("Segoe UI", 11), undo=True)
+        self.entry.tag_configure("placeholder", foreground=self.colors["muted"])
+        self.placeholder_visible = True
+        self.entry.insert("1.0", COMPOSER_PLACEHOLDER, "placeholder")
+        self.entry.edit_modified(False)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", self.submit)
+        self.entry.bind("<Shift-Return>", lambda _event: None)
+        self.entry.bind("<KeyRelease>", self._resize_composer, add="+")
+        self.entry.bind("<<Modified>>", self._composer_modified, add="+")
+        self.entry.bind("<FocusIn>", self._clear_composer_placeholder, add="+")
+        self.entry.bind("<FocusOut>", self._show_composer_placeholder, add="+")
         self.entry.bind("<Button-1>", self._entry_clicked, add="+")
-        ttk.Button(composer, text="Ask", style="Accent.TButton", command=self.submit).pack(
-            side="left", padx=(8, 0))
+        self.ask_button = ttk.Button(composer, text="Ask", style="Accent.TButton",
+                                     command=self.submit)
+        self.ask_button.pack(side="left", padx=(8, 0), anchor="s")
 
         footer = ttk.Frame(frame)
         footer.pack(fill="x", pady=(8, 0))
         self.status = tk.StringVar(value="Ask about something you saw on this computer.")
-        ttk.Label(footer, textvariable=self.status, style="Muted.TLabel").pack(side="left")
+        ttk.Label(footer, textvariable=self.status, style="Muted.TLabel",
+                  wraplength=210, justify="left").pack(side="left", fill="x", expand=True)
         ttk.Button(footer, text="Quit", command=self.close).pack(side="right")
         ttk.Button(footer, text="Open in Dockt", command=self.open_in_dockt).pack(side="right")
         ttk.Button(footer, text="Hide", command=self.hide).pack(side="right", padx=(0, 7))
@@ -395,41 +468,76 @@ class QuickChat:
         self.chat.lift()
         self.chat.attributes("-topmost", True)
         self.chat.after_idle(self._focus_entry)
-        self.chat.after(120, self._focus_entry)
-        self.chat.after(300, self._focus_entry)
+        self.chat.after(120, self._focus_entry_if_unfocused)
 
     def _chat_mapped(self, _event=None):
         if self.chat.state() != "withdrawn":
             self.chat.after_idle(self._focus_entry)
 
     def _entry_clicked(self, _event=None):
-        self.chat.after_idle(self._focus_entry)
+        # Let Tk place the insertion cursor from the click before raising/focusing.
+        self.chat.after_idle(lambda: self._focus_entry(move_cursor=False))
 
-    def _focus_entry(self):
+    def _focus_entry_if_unfocused(self):
         if self.chat.state() == "withdrawn":
             return
+        focused = self.chat.focus_get()
+        if focused is None or focused == self.chat:
+            self._focus_entry()
+
+    def _focus_entry(self, move_cursor: bool = True):
+        if self.chat.state() == "withdrawn":
+            return
+        self.chat.deiconify()
         self.chat.lift()
         if os.name == "nt":
             try:
-                hwnd = wintypes.HWND(self.chat.winfo_id())
-                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                ctypes.windll.user32.SetForegroundWindow(hwnd)
-            except (AttributeError, OSError, tk.TclError):
+                user32 = ctypes.windll.user32
+                _focus_windows_entry(self.chat.winfo_id(), self.entry.winfo_id(),
+                                     user32, ctypes.windll.kernel32)
+            except (AttributeError, OSError, tk.TclError, TypeError):
                 pass
         self.chat.focus_force()
-        self.entry.focus_force()
-        self.entry.icursor("end")
+        self.entry.focus_set()
+        if move_cursor:
+            self.entry.mark_set("insert", "end-1c")
+
+    def _resize_composer(self, _event=None):
+        lines = self.entry.count("1.0", "end-1c", "displaylines") or (1,)
+        self.entry.configure(height=max(1, min(5, lines[0])))
+
+    def _composer_modified(self, _event=None):
+        if self.entry.edit_modified():
+            self.entry.edit_modified(False)
+            self._resize_composer()
+
+    def _clear_composer_placeholder(self, _event=None):
+        if self.placeholder_visible:
+            self.entry.delete("1.0", "end")
+            self.placeholder_visible = False
+            self.entry.edit_modified(False)
+            self._resize_composer()
+
+    def _show_composer_placeholder(self, _event=None):
+        if not self.entry.get("1.0", "end-1c").strip():
+            self.placeholder_visible = True
+            self.entry.insert("1.0", COMPOSER_PLACEHOLDER, "placeholder")
+            self.entry.edit_modified(False)
+            self._resize_composer()
 
     def hide(self):
         self.chat.withdraw()
 
     def submit(self, _event=None):
-        question = self.question.get().strip()
+        if self.placeholder_visible:
+            return "break"
+        question = self.entry.get("1.0", "end-1c").strip()
         if not question or self.busy:
             return "break"
         self.busy = True
         self.latest_question = question
-        self.question.set("")
+        self.entry.delete("1.0", "end")
+        self._resize_composer()
         self.status.set("Searching your screen memories...")
         self._render(self.messages + [{"role": "user", "content": question}])
         request_messages = self.messages + [{"role": "user", "content": question}]
@@ -469,25 +577,26 @@ class QuickChat:
             self.transcript.insert("end", "You\n" if role == "user" else "Dockt\n",
                                    role)
             if role == "assistant":
-                self._insert_citations(message.get("content", ""))
+                self._insert_citations(message.get("content", ""), "assistant_body")
             else:
-                self.transcript.insert("end", message.get("content", "") + "\n\n")
+                self.transcript.insert("end", message.get("content", "") + "\n\n",
+                                       "user_body")
         if error:
             self.transcript.insert("end", "Dockt\n", "error")
             self.transcript.insert("end", error + "\n\n", "error")
         self.transcript.configure(state="disabled")
         self.transcript.see("end")
 
-    def _insert_citations(self, text: str):
+    def _insert_citations(self, text: str, tag: str = "assistant_body"):
         start = 0
         for match in CITATION.finditer(text):
-            self.transcript.insert("end", text[start:match.start()])
+            self.transcript.insert("end", text[start:match.start()], tag)
             cid = int(match.group(1))
-            button = ttk.Button(self.transcript, text=f"[#%d]" % cid,
+            button = ttk.Button(self.transcript, text=f"#{cid}", style="Citation.TButton",
                                 command=lambda capture_id=cid: open_dockt(f"/#/capture/{capture_id}"))
             self.transcript.window_create("end", window=button)
             start = match.end()
-        self.transcript.insert("end", text[start:] + "\n\n")
+        self.transcript.insert("end", text[start:] + "\n\n", tag)
 
     def _clear_thumbnails(self):
         for child in self.thumbnail_row.winfo_children():

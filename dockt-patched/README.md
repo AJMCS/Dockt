@@ -2,6 +2,16 @@
 
 > **Oct 10 update:** the architecture changed. The whole app now runs on each laptop (`python server/app.py` on 127.0.0.1:8000) and the GX10 only serves models through Ollama. `TEAM.md` and `team/ORCHESTRATION.md` are the source of truth; the sections below still describe the older "app on the GX10" setup and are kept for the commands.
 
+## Current Windows desktop launcher
+
+Run `start-dockt.bat` from the `dockt-patched` folder. It opens the native Dockt dashboard, starts local capture and the quick-chat pet, and uses the GX10 address from `gx10.txt` (or `DOCKT_GX10`). Add `--mock` to run the dashboard and chat against the local mock model without the GX10. Click the pet to open quick chat; `Ctrl+Space` toggles the chat window and `Esc` hides it.
+
+Run the regression and local API smoke tests from this folder with:
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
 Private screen memory for work, running on the ASUS GX10.
 
 ```

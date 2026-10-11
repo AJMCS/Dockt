@@ -132,6 +132,11 @@ def start_backend(mock: bool, capture: bool) -> subprocess.Popen | None:
     return server
 
 
+def start_quickchat() -> subprocess.Popen:
+    """Start Lane 1's popup with the same resolved local service URL as the dashboard."""
+    return spawn("quickchat", ["agent/quickchat.py"], dict(os.environ))
+
+
 def make_icon():
     """The favicon shape from team/DESIGN.md: a rounded #76B900 square. Needs Pillow (already a requirement)."""
     if ICON.exists():
@@ -211,6 +216,7 @@ def boot(window, h: str, server: subprocess.Popen | None):
                 "__TEXT__", f"Dockt couldn't start. Details are in {LOGS / 'server.log'}"))
             return
         time.sleep(0.4)
+    start_quickchat()
     window.load_url(BASE + "/" + h)
 
 
