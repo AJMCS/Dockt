@@ -2,3 +2,7 @@
 # and renders with WebView2, which ships with Windows 10/11.
 pywebview>=5.0
 customtkinter>=5.2,<7
+# Voice input's local speech-to-text (tools/whisper_server.py). faster-whisper 1.2.1 passes a PyAV option
+# (metadata_errors) that PyAV 19 removed, so hold PyAV below 19.
+faster-whisper>=1.1
+av<19

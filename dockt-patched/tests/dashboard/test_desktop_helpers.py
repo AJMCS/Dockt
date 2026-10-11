@@ -78,3 +78,43 @@ def test_ssh_tunnel_args_never_prompt_and_stay_local():
     assert args[-1] == "asus@169.233.72.21"
     assert "127.0.0.1:11435:127.0.0.1:11434" in args   # bound to loopback only, not the laptop's LAN address
     assert "BatchMode=yes" in args and "ExitOnForwardFailure=yes" in args
+
+
+# ---------- local Whisper server for voice input ----------
+@pytest.fixture
+def whisper_launch(monkeypatch):
+    spawned = []
+    monkeypatch.setattr(d, "spawn", lambda name, args, env, program=None: spawned.append((name, args, env)) or name)
+    monkeypatch.setattr(d, "listening", lambda port: False)
+    monkeypatch.setattr(d.importlib.util, "find_spec", lambda name: object() if name == "faster_whisper" else None)
+    monkeypatch.delenv("STT_URL", raising=False)
+    return spawned
+
+
+def test_whisper_starts_on_the_default_stt_port_in_english(whisper_launch):
+    assert d.start_whisper(mock=False, env={"PATH": "x"}) == "whisper"
+    [(name, args, env)] = whisper_launch
+    assert args[-4:] == ["--host", "127.0.0.1", "--port", "8001"] and "whisper_server:app" in args
+    assert env["WHISPER_LANGUAGE"] == "en" and env["PATH"] == "x"
+
+
+def test_whisper_keeps_an_explicit_language(whisper_launch):
+    d.start_whisper(mock=False, env={"WHISPER_LANGUAGE": "es"})
+    assert whisper_launch[0][2]["WHISPER_LANGUAGE"] == "es"
+
+
+@pytest.mark.parametrize("reason", ["mock", "stt_url_set", "already_running", "not_installed"])
+def test_whisper_is_not_started_when_not_needed(whisper_launch, monkeypatch, reason):
+    if reason == "stt_url_set":
+        monkeypatch.setenv("STT_URL", "http://gx10:8001/v1")
+    elif reason == "already_running":
+        monkeypatch.setattr(d, "listening", lambda port: port == d.WHISPER_PORT)
+    elif reason == "not_installed":
+        monkeypatch.setattr(d.importlib.util, "find_spec", lambda name: None)
+    assert d.start_whisper(mock=reason == "mock", env={}) is None
+    assert whisper_launch == []
+
+
+def test_mock_mode_sends_voice_input_to_the_mock(monkeypatch):
+    monkeypatch.delenv("STT_URL", raising=False)
+    assert d.model_env(mock=True)["STT_URL"] == "http://127.0.0.1:9000/v1"
