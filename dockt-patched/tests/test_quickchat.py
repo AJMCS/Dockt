@@ -476,10 +476,10 @@ class QuickChatTests(unittest.TestCase):
     def test_dashboard_starts_hidden_and_centered_at_a_compact_size(self):
         options = dockt_desktop.dashboard_window_options("")
         self.assertTrue(options["hidden"])
-        self.assertEqual((options["width"], options["height"]), (1040, 700))
+        self.assertEqual((options["width"], options["height"]), (1200, 760))
         self.assertIsNone(options["x"])
         self.assertIsNone(options["y"])
-        self.assertEqual(options["min_size"], (800, 540))
+        self.assertEqual(options["min_size"], (960, 600))
         self.assertFalse(dockt_desktop.dashboard_window_options("#/capture/9")["hidden"])
 
     def test_desktop_quit_control_closes_the_dashboard_window(self):

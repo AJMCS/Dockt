@@ -184,6 +184,13 @@ def is_excluded(app: str, title: str, patterns) -> bool:
     return any(p in s for p in patterns)
 
 
+def is_dockt_window(title: str) -> bool:
+    """Dockt's own dashboard, pet and quick chat. Exact title match, not a substring,
+    so an editor with this repo open (title contains 'dockt') is still captured."""
+    t = (title or "").strip().lower()
+    return t == "dockt" or t.startswith("dockt quick chat")
+
+
 # ---------- sending ----------
 class Sender(threading.Thread):
     def __init__(self, server, token, spool_dir):
@@ -309,7 +316,7 @@ def main():
             next_t += args.interval
             try:
                 app, title = active_window()
-                if PAUSE_FILE.exists() or is_excluded(app, title, exclude):
+                if PAUSE_FILE.exists() or is_excluded(app, title, exclude) or is_dockt_window(title):
                     det.reset()  # forget the screen; resume with a fresh capture
                 else:
                     shot = sct.grab(mon)

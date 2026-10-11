@@ -76,8 +76,8 @@ def clean_hash(h: str | None) -> str:
 def dashboard_window_options(h: str) -> dict:
     """Keep startup out of the way; explicit deep links request a visible window."""
     return {
-        "width": 1040, "height": 700, "x": None, "y": None,
-        "min_size": (800, 540), "hidden": not bool(h),
+        "width": 1200, "height": 760, "x": None, "y": None,
+        "min_size": (960, 600), "hidden": not bool(h),
         "background_color": "#FAF9F5", "text_select": True,
     }
 
