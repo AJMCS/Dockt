@@ -27,13 +27,17 @@ from PIL import Image, ImageTk
 BASE_URL = os.environ.get("DOCKT_URL", "http://127.0.0.1:8000").rstrip("/")
 DESKTOP_CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
 HOTKEY_ID = 1
-COMPOSER_PLACEHOLDER = "Ask anything you saw…"
+COMPOSER_PLACEHOLDER = "Ask anything you saw: where's dinner tonight? find invoice 4471…"
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 MOD_CONTROL = 0x0002
 MOD_NOREPEAT = 0x4000
 VK_SPACE = 0x20
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+DWMWA_CAPTION_COLOR = 35
+DWMWA_TEXT_COLOR = 36
 CITATION = re.compile(r"\[#(\d+)\]")
+MARKDOWN_TOKEN = re.compile(r"(\[#(\d+)\]|\*\*[^*]+\*\*|__.+?__|\*[^*\n]+\*|_[^_\n]+_|`[^`]+`)")
 CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
 # the theme the dashboard saves: <DATA_DIR>/theme, same default as server/memory.py; absent = follow the system
 THEME_FILE = Path(os.environ.get("DATA_DIR", str(Path.home() / ".dockt" / "data"))).resolve() / "theme"
@@ -162,6 +166,37 @@ def _focus_windows_entry(chat_hwnd: int, entry_hwnd: int, user32=None, kernel32=
             user32.AttachThreadInput(current_thread, foreground_thread, False)
 
 
+def _apply_windows_caption_theme(chat_hwnd: int, theme: str, dwmapi=None, user32=None) -> bool:
+    """Tint the native Windows 11 title bar to match the selected Dockt theme."""
+    if os.name != "nt" and (dwmapi is None or user32 is None):
+        return False
+    try:
+        user32 = user32 or ctypes.windll.user32
+        dwmapi = dwmapi or ctypes.windll.dwmapi
+        root = user32.GetAncestor(wintypes.HWND(chat_hwnd), 2) or wintypes.HWND(chat_hwnd)
+        colors = PALETTES[theme]
+
+        def colorref(value: str):
+            red, green, blue = (int(value[index:index + 2], 16)
+                                for index in (1, 3, 5))
+            return ctypes.c_uint32(red | (green << 8) | (blue << 16))
+
+        def set_attribute(attribute, value):
+            return dwmapi.DwmSetWindowAttribute(
+                root, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0
+
+        caption = colorref(colors["bg"])
+        title_text = colorref(colors["text"])
+        dark = ctypes.c_int(1 if theme == "dark" else 0)
+        results = [set_attribute(DWMWA_CAPTION_COLOR, caption),
+                   set_attribute(DWMWA_TEXT_COLOR, title_text),
+                   set_attribute(DWMWA_USE_IMMERSIVE_DARK_MODE, dark)]
+        return any(results)
+    except (AttributeError, OSError, TypeError, ValueError):
+        # DWM caption colors require Windows 11 22000 or newer.
+        return False
+
+
 def open_dockt(path: str = "") -> None:
     # The native desktop shell owns one window and exposes a local hand-off endpoint.
     # Prefer it so citations and "Open in Dockt" don't spawn duplicate Edge windows.
@@ -219,6 +254,138 @@ def load_thumbnail(capture_id: int):
         return None
 
 
+class ChatTranscript(ctk.CTkScrollableFrame):
+    """Compact native chat thread with dashboard-style aligned message bubbles."""
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.rendered_text: list[str] = []
+        self.text_labels: list[tuple[str, tk.Widget]] = []
+        self.source_buttons: dict[int, ctk.CTkButton] = {}
+        self.markdown_widgets: list[tk.Text] = []
+
+    def clear(self):
+        for child in self.winfo_children():
+            child.destroy()
+        self.rendered_text.clear()
+        self.text_labels.clear()
+        self.source_buttons.clear()
+        self.markdown_widgets.clear()
+
+    def add_message(self, role: str, text: str, colors: dict, citations=(), muted=False,
+                    show_no_sources=False):
+        self.rendered_text.append(text)
+        row = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        row.pack(fill="x", padx=8, pady=(0, 22))
+        wrap = max(160, int(self.winfo_width() * (0.78 if role == "user" else 0.94)))
+        if role == "user":
+            bubble = ctk.CTkFrame(row, fg_color=colors["surface2"],
+                                  corner_radius=16, border_width=1,
+                                  border_color=colors["line"])
+            bubble.pack(side="right", anchor="e")
+            label = ctk.CTkLabel(bubble, text=text, text_color=colors["text"],
+                                 font=("Segoe UI", 11), justify="left", anchor="w",
+                                 wraplength=wrap)
+            label.pack(padx=16, pady=10)
+        else:
+            label = tk.Text(row, height=1, wrap="word", relief="flat", bd=0,
+                            highlightthickness=0, padx=0, pady=0, takefocus=False,
+                            cursor="arrow", background=colors["bg"],
+                            foreground=colors["muted"] if muted else colors["text"],
+                            font=("Georgia", 13), spacing1=0, spacing3=2)
+            label.pack(side="left", fill="x", expand=True, anchor="w")
+            self._insert_markdown(label, text, colors, muted)
+            label.configure(state="disabled")
+            self.markdown_widgets.append(label)
+            if citations or show_no_sources:
+                chips = ctk.CTkFrame(row, fg_color="transparent")
+                chips.pack(fill="x", anchor="w", pady=(8, 0))
+                if show_no_sources and not citations:
+                    ctk.CTkLabel(chips, text="No sources cited.",
+                                 text_color=colors["muted"],
+                                 font=("Segoe UI", 10)).pack(side="left")
+                for capture_id, action in citations:
+                    button = ctk.CTkButton(
+                        chips, text=f"#{capture_id}", width=38, height=24,
+                        corner_radius=8, fg_color=colors["surface2"],
+                        hover_color=colors["line"], text_color=colors["muted"],
+                        font=("Segoe UI", 9, "bold"), command=action)
+                    button.pack(side="left", padx=(0, 6))
+                    self.source_buttons[capture_id] = button
+        self.text_labels.append((role, label))
+        self.update_idletasks()
+        self._parent_canvas.yview_moveto(1.0)
+
+    @staticmethod
+    def _insert_markdown(widget: tk.Text, text: str, colors: dict, muted=False):
+        widget.tag_configure("bold", font=("Georgia", 13, "bold"))
+        widget.tag_configure("italic", font=("Georgia", 13, "italic"))
+        widget.tag_configure("code", font=("Consolas", 11),
+                             foreground=colors["accent_text"],
+                             background=colors["surface2"])
+        widget.tag_configure("heading", font=("Segoe UI", 15, "bold"),
+                             foreground=colors["muted"] if muted else colors["text"])
+        widget.tag_bind("citation", "<Enter>", lambda _event: widget.configure(cursor="hand2"))
+        widget.tag_bind("citation", "<Leave>", lambda _event: widget.configure(cursor="arrow"))
+        for line in text.splitlines() or [""]:
+            heading = re.match(r"^#{1,3}\s+", line)
+            if heading:
+                widget.insert("end", line[heading.end():] + "\n", "heading")
+                continue
+            bullet = re.match(r"^\s*[-*]\s+", line)
+            if bullet:
+                widget.insert("end", "• ")
+                line = line[bullet.end():]
+            cursor = 0
+            for match in MARKDOWN_TOKEN.finditer(line):
+                widget.insert("end", line[cursor:match.start()])
+                token = match.group(0)
+                if token.startswith("[#"):
+                    capture_id = int(match.group(2))
+                    tag = f"citation_{capture_id}"
+                    widget.tag_configure(tag, foreground=colors["accent_text"],
+                                         underline=True)
+                    widget.tag_bind(tag, "<Button-1>",
+                                    lambda _event, cid=capture_id:
+                                    open_dockt(f"/#/capture/{cid}"))
+                    widget.insert("end", f"#{capture_id}", ("citation", tag))
+                elif token.startswith("**") or token.startswith("__"):
+                    widget.insert("end", token[2:-2], "bold")
+                elif token.startswith("*") or token.startswith("_"):
+                    widget.insert("end", token[1:-1], "italic")
+                else:
+                    widget.insert("end", token[1:-1], "code")
+                cursor = match.end()
+            widget.insert("end", line[cursor:] + "\n")
+
+    def add_thumbnail(self, capture_id: int, image: Image.Image, colors: dict):
+        button = self.source_buttons.get(capture_id)
+        if button is None:
+            return
+        image = image.copy()
+        image.thumbnail((46, 29), Image.Resampling.LANCZOS)
+        thumbnail = ImageTk.PhotoImage(image, master=button)
+        button.configure(image=thumbnail, text=f"#{capture_id}", compound="left",
+                         width=110, height=36, corner_radius=9, border_width=1,
+                         border_color=colors["line"], fg_color=colors["surface"],
+                         hover_color=colors["surface2"], text_color=colors["text"])
+        button.image = thumbnail
+
+    def update_theme(self, colors: dict):
+        for widget in self.markdown_widgets:
+            try:
+                widget.configure(background=colors["bg"], foreground=colors["text"])
+                widget.tag_configure("code", foreground=colors["accent_text"],
+                                     background=colors["surface2"])
+                widget.tag_configure("heading", foreground=colors["text"])
+            except tk.TclError:
+                pass
+
+    def get(self, _start="1.0", _end="end"):
+        """Keep the small read-only compatibility surface used by widget checks."""
+        return "\n".join(self.rendered_text) + ("\n" if self.rendered_text else "")
+
+
 class HotkeyListener(threading.Thread):
     """Use RegisterHotKey: no keyboard hook and no administrator access needed."""
 
@@ -262,9 +429,9 @@ class QuickChat:
         self.colors = PALETTES[self.theme_name]
         self.chat = ctk.CTkToplevel(self.root, fg_color=self.colors["bg"])
         self.chat.title("Dockt Quick Chat")
-        self.chat.geometry("700x580")
+        self.chat.geometry("560x480")
         self.chat.minsize(360, 280)
-        self.chat.attributes("-topmost", True)
+        self.chat.attributes("-topmost", False)
         self.chat.withdraw()
         self.chat.protocol("WM_DELETE_WINDOW", self.hide)
         self.chat.bind("<Escape>", lambda _event: self.hide())
@@ -276,10 +443,10 @@ class QuickChat:
         self.busy = False
         self.latest_question = ""
         self.retry_payload = None
-        self.photos: list[ImageTk.PhotoImage] = []
         self._composer_resize_job = None
         self._style()
         self._build()
+        _apply_windows_caption_theme(self.chat.winfo_id(), self.theme_name)
         self.chat.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._create_pet()
         self.root.after(80, self._drain_events)
@@ -346,7 +513,7 @@ class QuickChat:
             for option, keys in color_options.items():
                 try:
                     current = widget.cget(option)
-                except (tk.TclError, AttributeError):
+                except (tk.TclError, AttributeError, ValueError):
                     continue
                 replacement = next((current_palette[key] for key in keys
                                     if previous[key] == current), None)
@@ -368,17 +535,18 @@ class QuickChat:
         self.theme_name = theme
         self.colors = PALETTES[theme]
         self._style()
-        self._recolor_tree(self.root, previous, self.colors)
-        self.transcript.configure(bg=self.colors["bg"], fg=self.colors["text"],
-                                  insertbackground=self.colors["text"])
-        self.transcript.tag_configure("user", foreground=self.colors["text"])
-        self.transcript.tag_configure("user_body", foreground=self.colors["text"],
-                                      background=self.colors["surface2"])
-        self.transcript.tag_configure("assistant", foreground=self.colors["muted"])
-        self.transcript.tag_configure("assistant_body", foreground=self.colors["text"])
-        self.transcript.tag_configure("error", foreground=self.colors["error"])
+        # Quick Chat, the pet, and its context menu are separate Tk toplevels;
+        # recoloring only the hidden root leaves their CustomTk widgets stale.
+        for window in (self.chat, getattr(self, "pet", None),
+                       getattr(self, "options_panel", None)):
+            if window is not None:
+                self._recolor_tree(window, previous, self.colors)
+        self.transcript.configure(scrollbar_button_color=self.colors["surface2"],
+                                  scrollbar_button_hover_color=self.colors["accent"])
         self.entry._textbox.configure(insertbackground=self.colors["text"])
         self.entry._textbox.tag_configure("placeholder", foreground=self.colors["muted"])
+        self.transcript.update_theme(self.colors)
+        _apply_windows_caption_theme(self.chat.winfo_id(), self.theme_name)
 
     def _poll_theme(self):
         try:
@@ -419,44 +587,17 @@ class QuickChat:
         transcript_card = ctk.CTkFrame(
             frame, fg_color="transparent", corner_radius=0, height=1)
         transcript_card.grid(row=1, column=0, sticky="nsew", pady=(12, 8))
-        self.transcript = tk.Text(transcript_card, wrap="word", height=1, state="disabled",
-                                  bg=self.colors["bg"], fg=self.colors["text"],
-                                  insertbackground=self.colors["text"],
-                                  relief="flat", padx=18, pady=10, font=("Segoe UI", 12),
-                                  spacing1=2, spacing3=14, highlightthickness=0,
-                                  takefocus=False)
-        self.transcript.pack(side="left", fill="both", expand=True)
-        transcript_scrollbar = ctk.CTkScrollbar(
-            transcript_card, orientation="vertical", command=self.transcript.yview,
-            width=8, corner_radius=5, fg_color=self.colors["surface"],
-            button_color=self.colors["surface2"],
-            button_hover_color=self.colors["accent"])
-        transcript_scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
-        self.transcript.configure(yscrollcommand=transcript_scrollbar.set)
-        self.transcript.tag_configure("user", foreground=self.colors["muted"],
-                                      font=("Segoe UI", 9, "bold"), justify="right",
-                                      spacing1=8)
-        self.transcript.tag_configure("user_body", foreground=self.colors["text"],
-                                      background=self.colors["surface2"],
-                                      font=("Segoe UI", 11), justify="left",
-                                      lmargin1=72, lmargin2=72, rmargin=10,
-                                      spacing1=8, spacing3=16)
-        self.transcript.tag_configure("assistant", foreground=self.colors["muted"],
-                                      font=("Segoe UI", 9, "bold"), spacing1=8)
-        self.transcript.tag_configure("assistant_body", foreground=self.colors["text"],
-                                      font=("Georgia", 12), lmargin1=2, lmargin2=2,
-                                      rmargin=28, spacing1=2, spacing3=12)
-        self.transcript.tag_configure("error", foreground=self.colors["error"])
+        self.transcript = ChatTranscript(
+            transcript_card, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=self.colors["surface2"],
+            scrollbar_button_hover_color=self.colors["accent"])
+        self.transcript.pack(fill="both", expand=True)
         self.transcript.bind("<Configure>", self._resize_message_margins, add="+")
 
-        self.thumbnail_row = ctk.CTkFrame(frame, fg_color="transparent", height=1)
-        self.thumbnail_row.grid(row=2, column=0, sticky="ew", pady=(0, 7))
-
         composer = ctk.CTkFrame(frame, fg_color=self.colors["surface"], height=1,
-                                corner_radius=20, border_width=1,
+                                corner_radius=24, border_width=1,
                                 border_color=self.colors["line"])
-        composer.grid(row=3, column=0, sticky="ew")
-        composer.pack_propagate(False)
+        composer.grid(row=2, column=0, sticky="ew")
         composer.columnconfigure(0, weight=1)
         self.entry = ctk.CTkTextbox(composer, height=44, wrap="word", activate_scrollbars=False,
                                      corner_radius=14, border_width=0,
@@ -468,28 +609,36 @@ class QuickChat:
         self.placeholder_visible = True
         self.entry.insert("1.0", COMPOSER_PLACEHOLDER, "placeholder")
         self.entry.edit_modified(False)
-        self.entry.grid(row=0, column=0, sticky="ew", padx=(4, 0), pady=4)
+        self.entry.grid(row=0, column=0, columnspan=3, sticky="ew",
+                        padx=(8, 8), pady=(8, 0))
         self.entry.bind("<Return>", self.submit)
         self.entry.bind("<Shift-Return>", lambda _event: None)
         self.entry.bind("<<Modified>>", self._composer_modified, add="+")
         self.entry.bind("<FocusIn>", self._clear_composer_placeholder, add="+")
         self.entry.bind("<FocusOut>", self._show_composer_placeholder, add="+")
         self.entry.bind("<Button-1>", self._entry_clicked, add="+")
-        self.ask_button = ctk.CTkButton(composer, text="↑", width=36, height=36,
+        self.ask_button = ctk.CTkButton(composer, text="⬆",
+                                        width=36, height=36,
                                         corner_radius=18, fg_color=self.colors["accent"],
                                         hover_color="#6AA600", text_color=self.colors["on_accent"],
-                                        font=("Segoe UI", 18, "bold"), command=self.submit)
-        self.ask_button.grid(row=0, column=1, padx=(4, 8), pady=7, sticky="s")
+                                        font=("Segoe UI Symbol", 19, "bold"),
+                                        command=self.submit)
+        self.composer_hint = ctk.CTkLabel(
+            composer, text="Enter to send  ·  Shift + Enter for a new line",
+            text_color=self.colors["muted"],
+            font=("Segoe UI", 10))
+        self.composer_hint.grid(row=1, column=0, sticky="w", padx=(14, 0), pady=(3, 8))
+        self.ask_button.grid(row=1, column=1, padx=(4, 8), pady=(3, 8), sticky="e")
         self.retry_button = ctk.CTkButton(
             composer, text="Retry", command=self.retry_latest, width=76, height=42,
             corner_radius=13, fg_color=self.colors["surface2"],
             hover_color=self.colors["line"], text_color=self.colors["text"],
             font=("Segoe UI", 10, "bold"))
-        self.retry_button.grid(row=0, column=2, padx=(0, 8), pady=7, sticky="s")
+        self.retry_button.grid(row=1, column=2, padx=(0, 10), pady=(3, 8), sticky="e")
         self.retry_button.grid_remove()
 
         footer = ctk.CTkFrame(frame, fg_color="transparent", height=1)
-        footer.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        footer.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         footer.columnconfigure(0, weight=1)
         self.status = tk.StringVar(value="Ask about something you saw on this computer.")
         self.status_label = ctk.CTkLabel(
@@ -508,6 +657,7 @@ class QuickChat:
             self.footer_buttons.append(button)
         self.footer = footer
         self._layout_footer()
+
 
     def _schedule_responsive_layout(self, event=None):
         if event is not None and event.widget is not self.chat:
@@ -557,9 +707,9 @@ class QuickChat:
 
     def _resize_message_margins(self, _event=None):
         width = max(1, self.transcript.winfo_width())
-        left_margin = min(150, max(54, round(width * 0.2)))
-        self.transcript.tag_configure("user_body", lmargin1=left_margin,
-                                      lmargin2=left_margin, rmargin=10)
+        for role, label in self.transcript.text_labels:
+            if role == "user":
+                label.configure(wraplength=max(160, int(width * 0.78)))
 
     def _create_pet(self):
         self.pet = tk.Toplevel(self.root)
@@ -650,15 +800,16 @@ class QuickChat:
         return canvas.create_polygon(*points, smooth=True, splinesteps=12, **kwargs)
 
     def _draw_pet_controls(self, canvas):
-        self._rounded_rect(canvas, 43, 110, 117, 138, 14, fill="#252824",
+        self._rounded_rect(canvas, 43, 110, 117, 138, 12, fill="#252824",
                            outline="#454A43", width=1, tags=("pet-control-bar",))
         for name, center in (("chat", 64), ("menu", 96)):
             active = self.pet_hover_button == name
-            fill = "#41493B" if active else "#30342F"
-            outline = "#90B87B" if active else "#50564D"
-            canvas.create_oval(center - 10, 114, center + 10, 134, fill=fill,
-                               outline=outline, width=1.3,
-                               tags=("pet-control", f"pet-control-{name}"))
+            fill = "#555A53" if active else "#252824"
+            outline = "#555A53" if active else "#252824"
+            self._rounded_rect(
+                canvas, center - 12, 113, center + 12, 135, 6,
+                fill=fill, outline=outline, width=1.2,
+                tags=("pet-control", f"pet-control-{name}"))
             if name == "chat":
                 canvas.create_rectangle(center - 5, 119, center + 5, 127,
                                         outline="#F1F3EE", width=1.5,
@@ -685,9 +836,9 @@ class QuickChat:
 
     def _pet_button_at(self, x, y):
         x, y = x / self.ui_scale, y / self.ui_scale
-        if 54 <= x <= 74 and 114 <= y <= 134:
+        if 52 <= x <= 76 and 112 <= y <= 136:
             return "chat"
-        if 86 <= x <= 106 and 114 <= y <= 134:
+        if 84 <= x <= 108 and 112 <= y <= 136:
             return "menu"
         return None
 
@@ -756,7 +907,7 @@ class QuickChat:
         panel.overrideredirect(True)
         panel.attributes("-topmost", True)
 
-        card = ctk.CTkFrame(panel, width=292, fg_color=self.colors["surface"],
+        card = ctk.CTkFrame(panel, width=318, fg_color=self.colors["surface"],
                             corner_radius=18, border_width=1,
                             border_color=self.colors["line"])
         card.pack(fill="both", expand=True, padx=1, pady=1)
@@ -767,7 +918,7 @@ class QuickChat:
         ctk.CTkLabel(title_group, text="Dockt", text_color=self.colors["text"],
                      font=("Segoe UI", 15, "bold")).pack(anchor="w")
         ctk.CTkLabel(title_group, text="Quick actions", text_color=self.colors["muted"],
-                     font=("Segoe UI", 10)).pack(anchor="w")
+                     font=("Segoe UI", 11)).pack(anchor="w")
         ctk.CTkButton(header, text="\u00d7", width=30, height=30, corner_radius=10,
                       fg_color="transparent", hover_color=self.colors["surface2"],
                       text_color=self.colors["muted"], font=("Segoe UI", 18),
@@ -800,10 +951,10 @@ class QuickChat:
         colors = self.colors
         button = ctk.CTkButton(
             parent, text=f"{icon}   {label}" if icon else label,
-            anchor="w", height=42, corner_radius=11, border_width=0,
-            fg_color="transparent", hover_color=colors["accent_soft"],
+            anchor="w", height=46, corner_radius=12, border_width=0,
+            fg_color="transparent", hover_color=colors["line"],
             text_color=colors["error"] if danger else colors["text"],
-            font=("Segoe UI", 11, "bold" if danger else "normal"),
+            font=("Segoe UI", 12, "bold" if danger else "normal"),
             command=lambda: self._run_option(action))
         button.pack(fill="x", padx=2, pady=2)
         return button
@@ -879,17 +1030,26 @@ class QuickChat:
         # footer and composer below the visible edge.
         available_width = max(1, round((screen_width - 32) / scale))
         available_height = max(1, round((screen_height - 80) / scale))
-        width = min(720, available_width)
-        height = min(600, available_height)
+        width = min(560, available_width)
+        height = min(480, available_height)
         self.chat.minsize(min(360, width), min(280, height))
-        x = max(0, round((screen_width / scale - width) / 2))
-        y = max(0, round((screen_height / scale - height) / 2))
+        pet_x, pet_y = self.pet.winfo_rootx(), self.pet.winfo_rooty()
+        pet_width, pet_height = self.pet.winfo_width(), self.pet.winfo_height()
+        gap = round(12 * scale)
+        # The pet window is always-on-top; keep the chat close without covering it.
+        x_px = pet_x + pet_width - round(width * scale)
+        y_px = pet_y - round(height * scale) - gap
+        if y_px < 8:
+            y_px = pet_y + pet_height + gap
+        x_px = min(max(8, x_px), max(8, screen_width - round(width * scale) - 8))
+        y_px = min(max(8, y_px), max(8, screen_height - round(height * scale) - 8))
+        x = round(x_px / scale)
+        y = round(y_px / scale)
         self.chat.geometry(f"{width}x{height}+{x}+{y}")
         self.chat.deiconify()
         self.chat.lift()
-        self.chat.attributes("-topmost", True)
-        self.chat.after_idle(self._focus_entry)
-        self.chat.after(120, self._focus_entry_if_unfocused)
+        self.chat.attributes("-topmost", False)
+        _apply_windows_caption_theme(self.chat.winfo_id(), self.theme_name)
 
     def _poll_shared_history(self):
         # A fresh chat gets a UUID before it has a saved row. Polling that
@@ -1001,7 +1161,11 @@ class QuickChat:
         self.entry.delete("1.0", "end")
         self._resize_composer()
         self.status.set("Searching your screen memories...")
-        self._render(self.messages + [{"role": "user", "content": question}])
+        display_messages = self.messages + [{"role": "user", "content": question}]
+        if hasattr(self, "transcript"):
+            self._render(display_messages, pending=True)
+        else:
+            self._render(display_messages)
         request_messages = self.messages + [{"role": "user", "content": question}]
         threading.Thread(target=self._ask, args=(question, request_messages), daemon=True).start()
         return "break"
@@ -1015,6 +1179,8 @@ class QuickChat:
         self.retry_button.configure(state="disabled")
         self.status.set("Retrying your question...")
         question = next((m["content"] for m in reversed(request_messages) if m.get("role") == "user"), "")
+        if hasattr(self, "transcript"):
+            self._render(request_messages, pending=True)
         threading.Thread(target=self._ask, args=(question, request_messages), daemon=True).start()
         return "break"
 
@@ -1030,60 +1196,47 @@ class QuickChat:
         # A thumbnail failure must not turn a successful answer into a chat error.
         try:
             sources = result.get("sources") or []
-            cited = result.get("cited") or [int(cid) for cid in CITATION.findall(answer)]
+            cited = result.get("cited")
+            if cited is None:
+                cited = [int(cid) for cid in CITATION.findall(answer)]
             ids = [int(cid) for cid in cited if str(cid).isdigit()]
-            if not ids:
-                ids = [int(row["id"]) for row in sources[:3] if row.get("id") is not None]
-            for cid in ids[:3]:
+            for cid in ids[:6]:
                 image = load_thumbnail(cid)
                 if image is not None:
                     self.events.put(("thumbnail", (cid, image)))
         except (TypeError, ValueError, KeyError, AttributeError):
             pass
 
-    def _render(self, messages: list[dict], error: str = ""):
-        self.transcript.configure(state="normal")
-        self.transcript.delete("1.0", "end")
+    def _render(self, messages: list[dict], error: str = "", pending: bool = False):
+        self.transcript.clear()
         for message in messages:
             role = message.get("role")
             if role not in ("user", "assistant"):
                 continue
-            self.transcript.insert("end", "You\n" if role == "user" else "Dockt\n",
-                                   role)
-            if role == "assistant":
-                self._insert_citations(message.get("content", ""), "assistant_body")
+            text = message.get("content", "")
+            if "cited" in message:
+                citation_ids = [int(cid) for cid in message.get("cited", [])
+                                if str(cid).isdigit()]
             else:
-                self.transcript.insert("end", message.get("content", "") + "\n\n",
-                                       "user_body")
+                citation_ids = [int(cid) for cid in CITATION.findall(text)]
+            citation_ids = list(dict.fromkeys(citation_ids))
+            actions = [(cid, lambda capture_id=cid: open_dockt(f"/#/capture/{capture_id}"))
+                       for cid in citation_ids]
+            self.transcript.add_message(role, text, self.colors, actions,
+                                        show_no_sources=(role == "assistant" and
+                                                         "sources" in message and
+                                                         not citation_ids))
         if error:
-            self.transcript.insert("end", "Dockt\n", "error")
-            self.transcript.insert("end", error + "\n\n", "error")
-        self.transcript.configure(state="disabled")
-        self.transcript.see("end")
-
-    def _insert_citations(self, text: str, tag: str = "assistant_body"):
-        start = 0
-        for match in CITATION.finditer(text):
-            self.transcript.insert("end", text[start:match.start()], tag)
-            cid = int(match.group(1))
-            button = ttk.Button(self.transcript, text=f"#{cid}", style="Citation.TButton",
-                                command=lambda capture_id=cid: open_dockt(f"/#/capture/{capture_id}"))
-            self.transcript.window_create("end", window=button)
-            start = match.end()
-        self.transcript.insert("end", text[start:] + "\n\n", tag)
+            self.transcript.add_message("assistant", error, self.colors, muted=True)
+        elif pending:
+            self.transcript.add_message("assistant", "Thinking…", self.colors, muted=True)
 
     def _clear_thumbnails(self):
-        for child in self.thumbnail_row.winfo_children():
-            child.destroy()
-        self.photos.clear()
+        # Capture previews belong to transcript rows, which are cleared on rerender.
+        pass
 
     def _add_thumbnail(self, cid: int, image: Image.Image):
-        photo = ImageTk.PhotoImage(image)
-        self.photos.append(photo)
-        button = ttk.Button(self.thumbnail_row, image=photo, text=f"Capture #{cid}",
-                            compound="top",
-                            command=lambda capture_id=cid: open_dockt(f"/#/capture/{capture_id}"))
-        button.pack(side="left", padx=(0, 8))
+        self.transcript.add_thumbnail(cid, image, self.colors)
 
     def open_in_dockt(self):
         if not self.messages:
@@ -1135,7 +1288,7 @@ class QuickChat:
                     self.ask_button.configure(state="normal")
                     self.retry_button.grid_remove()
                     self.retry_payload = None
-                    self.status.set(f"Answered in {result.get('ms', 0)} ms | Esc hides this window")
+                    self.status.set("Answered · Esc hides this window")
                     self._render(self.messages)
                     self._clear_thumbnails()
         except queue.Empty:

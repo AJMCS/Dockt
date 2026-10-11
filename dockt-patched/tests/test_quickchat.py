@@ -330,6 +330,25 @@ class QuickChatTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["args"][1], app.retry_payload)
         thread.start.assert_called_once_with()
 
+    def test_show_opens_quickchat_at_the_compact_default_size(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app._pet_hint = Mock()
+        app.theme_name = "light"
+        app.pet = Mock()
+        app.chat = Mock()
+        app.chat.winfo_screenwidth.return_value = 1920
+        app.chat.winfo_screenheight.return_value = 1080
+        app.chat.winfo_id.return_value = 123
+        app.pet.winfo_rootx.return_value = 1700
+        app.pet.winfo_rooty.return_value = 700
+        app.pet.winfo_width.return_value = 160
+        app.pet.winfo_height.return_value = 140
+        with patch.object(quickchat.ctk.ScalingTracker, "get_window_scaling", return_value=1.0), \
+             patch.object(quickchat, "_apply_windows_caption_theme"):
+            app.show()
+        app.chat.geometry.assert_called_once_with("560x480+1300+208")
+        app.chat.minsize.assert_called_once_with(360, 280)
+
     def test_history_poll_skips_a_new_unsaved_conversation(self):
         app = quickchat.QuickChat.__new__(quickchat.QuickChat)
         app.history_ts = 0
@@ -525,6 +544,15 @@ class QuickChatTests(unittest.TestCase):
         self.assertEqual(args[:2], ("quickchat", ["agent/quickchat.py"]))
         self.assertEqual(args[2]["DOCKT_URL"], "http://127.0.0.1:8123")
         self.assertEqual(args[2]["DOCKT_PORT"], "8123")
+
+    def test_reusing_running_backend_still_restarts_gx10_tunnel(self):
+        with patch.dict(dockt_desktop.os.environ,
+                        {"DOCKT_GX10": "asus@169.233.72.21"}, clear=True), \
+             patch.object(dockt_desktop, "answers",
+                          side_effect=lambda url, timeout=1.0: url.endswith("/api/stats")), \
+             patch.object(dockt_desktop, "start_tunnel") as start_tunnel:
+            self.assertIsNone(dockt_desktop.start_backend(mock=False, capture=False))
+        start_tunnel.assert_called_once_with("asus@169.233.72.21")
 
     def test_primary_launcher_starts_one_native_app_with_quick_chat(self):
         launcher = (ROOT / "start-dockt.bat").read_text(encoding="utf-8")
