@@ -43,6 +43,11 @@ def test_invalid_and_duplicate_suggestions_are_removed():
         {"label": "Review NDA", "prompt": "Review the NDA"}]
     for raw in ("garbage", "[]", '{"suggestions": null}'):
         assert brain._parse_suggestions(raw) == []
+    valid = '{"suggestions":[{"label":"Draft NDA","prompt":"Draft the NDA"}]}'
+    assert brain._parse_suggestions(valid + "\n}") == [{"label": "Draft NDA", "prompt": "Draft the NDA"}]
+    assert brain._parse_suggestions(valid[:-1]) == [{"label": "Draft NDA", "prompt": "Draft the NDA"}]
+    assert brain._parse_suggestions(valid[:-5]) == []
+    assert brain._parse_suggestions(valid + "unrelated prose") == []
 
 
 def test_model_outage_and_malformed_output_are_optional(monkeypatch):
