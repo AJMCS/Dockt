@@ -576,22 +576,33 @@ def test_composer_pinned_to_bottom(dash):
     assert not dash.js("document.documentElement.scrollHeight > innerHeight"), "the page itself should not scroll"
 
 
-def test_panels_open_from_top_right_like_artifacts(dash):
+def test_panels_are_tabs_like_artifacts(dash):
+    """Sources, Promises and Timeline are all tabs: the open one is highlighted; clicking it again (or the panel's
+    x) closes the panel and gives the chat the full width. Wide windows start on Sources."""
     dash.open().ask("where is dinner tonight")
     pane_w = lambda: dash.page.locator("#pane").bounding_box()["width"]
+    chat_w = lambda: dash.page.locator(".chat").bounding_box()["width"]
     visible = lambda v: dash.page.locator(f"#pane [data-view={v}]").is_visible()
-    assert visible("sources") and not dash.page.locator(".tab[data-pane=sources]").is_visible()
-    narrow_w = pane_w()
+    is_on = lambda v: "on" in dash.page.locator(f".tab[data-pane={v}]").get_attribute("class").split()
+    assert dash.page.locator(".tab[data-pane=sources]").is_visible()
+    assert visible("sources") and is_on("sources"), "wide windows open on Sources, shown as the active tab"
+    assert dash.page.inner_text("#srcCount") == str(dash.page.locator("#sources .card").count())
+    sources_w, with_panel = pane_w(), chat_w()
     open_pane(dash, "promises")
-    assert not visible("sources") and dash.page.locator(".tab[data-pane=promises]").get_attribute("class").count("on")
+    assert not visible("sources") and is_on("promises") and not is_on("sources")
     dash.page.wait_for_timeout(300)
-    assert pane_w() > narrow_w, "an open panel should widen like an artifact"
-    dash.page.click(".tab[data-pane=promises]")               # second click closes it
-    assert visible("sources")
+    assert pane_w() > sources_w, "an open panel should widen like an artifact"
+    dash.page.click(".tab[data-pane=promises]")               # clicking the open tab closes the panel
+    dash.page.wait_for_timeout(300)
+    assert not dash.js("paneVisible()") and dash.page.locator(".tab.on").count() == 0
+    assert chat_w() > with_panel + 200, "a closed panel gives the chat the room"
+    open_pane(dash, "sources")                                 # Sources reopens like any tab
+    assert visible("sources") and is_on("sources")
+    dash.page.click("#pane [data-view=sources] .pane-close")   # and its x closes it
+    assert not dash.js("paneVisible()")
     open_pane(dash, "timeline")
-    dash.page.click("#pane [data-view=timeline] .pane-close")  # so does the x
-    assert visible("sources")
-    assert dash.page.locator(".tab.on").count() == 0
+    dash.page.click("#pane [data-view=timeline] .pane-close")
+    assert not dash.js("paneVisible()") and dash.page.locator(".tab.on").count() == 0
 
 
 @pytest.mark.viewport(1440, 900)
@@ -617,6 +628,7 @@ def test_sources_panel_resizes_by_dragging_its_edge(dash):
     dash.page.wait_for_timeout(300)
     assert pane_w() == 440, "each panel keeps its own width"
     dash.page.click(".tab[data-pane=promises]")
+    open_pane(dash, "sources")
     dash.page.dblclick(".pane-resize")
     dash.page.wait_for_timeout(300)
     assert pane_w() == start, "double-click resets to the default"

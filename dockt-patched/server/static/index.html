@@ -185,7 +185,7 @@
   .btn { background: transparent; border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; font-size: 13.5px; cursor: pointer;
          transition: background .15s, border-color .15s; }
   .btn:hover { background: var(--hover); }
-  .btn.icon { border-color: transparent; }
+  .btn.icon { border-color: transparent; padding: 0; }   /* .btn's padding would squeeze the icon off-centre */
   .btn:focus-visible, .go:focus-visible, .mic:focus-visible, .cite:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .meta { color: var(--muted); font-size: 12px; }
 
@@ -194,6 +194,7 @@
   #pane { width: var(--pane-w, 300px); flex: none; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line);
           background: var(--bg); transition: width .2s ease; position: relative; container-type: inline-size; }
   body[data-pane="promises"] #pane, body[data-pane="timeline"] #pane { width: var(--pane-w, 440px); }
+  body.pane-shut #pane { display: none; }   /* wide windows: every tab, Sources included, can close the panel */
   /* drag the panel's left edge to resize it; double-click resets; arrow keys when focused */
   .pane-resize { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 2; touch-action: none; }
   .pane-resize::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .15s; }
@@ -207,7 +208,6 @@
   body[data-pane="timeline"] #pane [data-view="timeline"] { display: flex; }
   .pane-head { display: flex; align-items: center; gap: 8px; padding: 12px 10px 8px 16px; }
   .pane-head h3 { margin: 0; flex: 1; }
-  [data-view="sources"] .pane-close { display: none; }
   .pane-body { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 14px 18px; }
   .pane-actions { margin: 0 0 10px; }
   #tlTitle { margin: 18px 2px 8px; }
@@ -326,7 +326,6 @@
              transform: translateX(100%); transition: transform .2s ease; box-shadow: var(--shadow); }
     body.pane-open #pane { transform: none; }
     body.pane-open #scrim { display: block; }
-    [data-view="sources"] .pane-close { display: grid; }
   }
   @media (max-width: 900px) {
     #sidebar { position: fixed; left: 0; top: 0; transform: translateX(-100%); transition: transform .2s ease; box-shadow: var(--shadow); }
@@ -378,7 +377,7 @@
   <div class="logo mobile-only">Dockt<span>.</span></div>
   <div class="local mobile-only">● Powered by local AI</div>
   <nav class="tabs" aria-label="Panels">
-    <button class="tab narrow-only" data-pane="sources" title="Screenshots behind the answer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 15l4.5-4 4 3.5 3-2.5 5 4"/></svg><span>Sources</span></button>
+    <button class="tab" data-pane="sources" title="Screenshots behind the answer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 15l4.5-4 4 3.5 3-2.5 5 4"/></svg><span>Sources</span><b class="count" id="srcCount"></b></button>
     <button class="tab" data-pane="promises" title="Things you promised"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.2l2.4 2.4 4.6-5"/></svg><span>Promises</span><b class="count" id="promCount"></b></button>
     <button class="tab" data-pane="timeline" title="Your day at a glance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 19V13M10 19V7M15 19v-9M20 19V4"/></svg><span>Timeline</span></button>
   </nav>
@@ -684,6 +683,7 @@ function showSources(items, cited = [], title = "Sources") {
   $("#sourcesTitle").textContent = title;
   const rows = [...items].sort((a, b) => cited.includes(b.id) - cited.includes(a.id));   // cited first, else keep rank
   $("#sources").innerHTML = rows.length ? rows.map(r => card(r, cited.includes(r.id))).join("") : NO_SOURCES;
+  $("#srcCount").textContent = rows.length || "";
 }
 
 // The screenshots a response cites, as thumbnails under it, in citation order. "+N more" opens the side panel,
@@ -803,16 +803,23 @@ $("#sbToggle").onclick = () => matchMedia("(max-width: 900px)").matches
   ? closeSidebar() : setSidebarCollapsed(!document.documentElement.classList.contains("sb-collapsed"));
 setSidebarCollapsed(document.documentElement.classList.contains("sb-collapsed"));
 
-// ---------- side panel: Sources by default; Promises / Timeline open from the top-right buttons ----------
+// ---------- side panel: Sources / Promises / Timeline are tabs, top right; the open one is highlighted ----------
+// Clicking the open tab (or the panel's x) closes the panel. Wide windows start on Sources, narrow ones closed.
 const narrow = () => matchMedia("(max-width: 1100px)").matches;   // panel overlays the chat below this width
-const paneVisible = () => !narrow() || document.body.classList.contains("pane-open");
+const paneVisible = () => narrow() ? document.body.classList.contains("pane-open")
+                                   : !document.body.classList.contains("pane-shut");
+function syncTabs() {
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", paneVisible() && b.dataset.pane === document.body.dataset.pane));
+}
 function setPane(name, open = true) {
   document.body.dataset.pane = name;
   applyPaneWidth();
   document.body.classList.toggle("pane-open", open && narrow());
-  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", paneVisible() && b.dataset.pane === name && (name !== "sources" || narrow())));
+  document.body.classList.toggle("pane-shut", !open && !narrow());
+  syncTabs();
 }
-function closePane() { narrow() ? setPane(document.body.dataset.pane, false) : setPane("sources"); }
+function closePane() { setPane(document.body.dataset.pane, false); }
+window.addEventListener("resize", syncTabs);
 
 // resizable panel: each view remembers its own width (localStorage); no stored width = the CSS default
 const PANE_W_KEY = "dockt-pane-w", PANE_MIN = 260;
@@ -1147,7 +1154,7 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 $("#pane").style.transition = "none";   // a remembered width applies at once, without growing in on load
-setPane("sources", false);   // narrow windows start with the panel closed
+setPane("sources", !narrow());   // wide windows start on Sources; narrow ones with the panel closed
 requestAnimationFrame(() => requestAnimationFrame(() => $("#pane").style.transition = ""));
 route();
 
