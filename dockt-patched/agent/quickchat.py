@@ -106,6 +106,13 @@ def capture_is_paused() -> bool:
     return CAPTURE_PAUSE_FILE.exists()
 
 
+def _corner_key(colors: dict) -> str:
+    """Transparent key for popup corners: one shade off the border colour, so the anti-aliased
+    edge of a rounded card blends into what looks like its own border instead of a coloured fringe."""
+    line = colors["line"]
+    return line[:-2] + f"{int(line[-2:], 16) ^ 1:02X}"
+
+
 def _saved_theme() -> str | None:
     try:
         theme = THEME_FILE.read_text(encoding="utf-8").strip()
@@ -405,6 +412,44 @@ def _pet_image(size: int, blink: bool = False, key: tuple | None = None,
         image = solid
         image.putalpha(alpha.point(lambda a: 255 if a >= 128 else 0))
     return image
+
+
+class _OwnedCTkImage(ctk.CTkImage):
+    """CTkImage that makes its Tk photos on a given widget's interpreter. Stock CTkImage uses Tk's
+    default root, which is a different interpreter whenever more than one Tk root exists."""
+
+    def __init__(self, master, **kwargs):
+        super().__init__(**kwargs)
+        self._master = master
+
+    def _get_scaled_light_photo_image(self, scaled_size):
+        if scaled_size not in self._scaled_light_photo_images:
+            self._scaled_light_photo_images[scaled_size] = ImageTk.PhotoImage(
+                self._light_image.resize(scaled_size), master=self._master)
+        return self._scaled_light_photo_images[scaled_size]
+
+    def _get_scaled_dark_photo_image(self, scaled_size):
+        if scaled_size not in self._scaled_dark_photo_images:
+            self._scaled_dark_photo_images[scaled_size] = ImageTk.PhotoImage(
+                self._dark_image.resize(scaled_size), master=self._master)
+        return self._scaled_dark_photo_images[scaled_size]
+
+
+def _power_icon(master, color: str, size: int = 14) -> ctk.CTkImage:
+    """A power symbol for "Quit Dockt". No Windows font has U+23FB, which rendered as a box."""
+    from PIL import ImageDraw
+    big = size * 8
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    width = round(big * 0.13)
+    inset = width / 2 + big * 0.06
+    draw.arc((inset, inset + big * 0.04, big - inset, big - inset + big * 0.04), -50, 230,
+             fill=color, width=width)
+    draw.line((big / 2, big * 0.04 + width / 2, big / 2, big * 0.5), fill=color, width=width)
+    for y in (big * 0.04 + width / 2, big * 0.5):        # round line caps
+        draw.ellipse((big / 2 - width / 2, y - width / 2, big / 2 + width / 2, y + width / 2), fill=color)
+    image = image.resize((size * 4, size * 4), Image.Resampling.LANCZOS)
+    return _OwnedCTkImage(master, light_image=image, dark_image=image, size=(size, size))
 
 
 class SendButton(tk.Label):
@@ -772,6 +817,10 @@ class QuickChat:
                        getattr(self, "options_panel", None)):
             if window is not None:
                 self._recolor_tree(window, previous, self.colors)
+        if getattr(self, "options_panel", None) is not None:
+            self.options_panel.configure(fg_color=_corner_key(self.colors))
+            self._key_panel_corners(self.options_panel)
+            self.quit_option.configure(image=_power_icon(self.options_panel, self.colors["error"]))
         self.transcript.configure(scrollbar_button_color=self.colors["surface2"],
                                   scrollbar_button_hover_color=self.colors["accent"])
         self.entry._textbox.configure(insertbackground=self.colors["text"])
@@ -949,8 +998,10 @@ class QuickChat:
     def _place_pet(self):
         self.pet.update_idletasks()
         width, height = round(160*self.ui_scale), round(140*self.ui_scale)
-        x = max(0, self.pet.winfo_screenwidth() - width - 24)
-        y = max(0, self.pet.winfo_screenheight() - height - round(88*self.ui_scale))
+        screen_w, screen_h = self.pet.winfo_screenwidth(), self.pet.winfo_screenheight()
+        # In from the corner by a share of the screen, so it clears the taskbar and edge on any size.
+        x = max(0, screen_w - width - max(round(24*self.ui_scale), round(screen_w * 0.04)))
+        y = max(0, screen_h - height - max(round(88*self.ui_scale), round(screen_h * 0.14)))
         self.pet.geometry(f"{width}x{height}+{x}+{y}")
 
     def _draw_pet(self):
@@ -1093,15 +1144,17 @@ class QuickChat:
     def _show_options_at(self, x_root, y_root):
         self._pet_hint(False)
         self._close_options_panel()
-        panel = ctk.CTkToplevel(self.pet, fg_color=self.colors["line"])
+        # The window behind the rounded card is keyed transparent, so only the card shows.
+        panel = ctk.CTkToplevel(self.pet, fg_color=_corner_key(self.colors))
         self.options_panel = panel
         panel.overrideredirect(True)
         panel.attributes("-topmost", True)
+        self._key_panel_corners(panel)
 
         card = ctk.CTkFrame(panel, width=318, fg_color=self.colors["surface"],
                             corner_radius=18, border_width=1,
                             border_color=self.colors["line"])
-        card.pack(fill="both", expand=True, padx=1, pady=1)
+        card.pack(fill="both", expand=True)
         header = ctk.CTkFrame(card, fg_color="transparent", height=48)
         header.pack(fill="x", padx=12, pady=(10, 6))
         title_group = ctk.CTkFrame(header, fg_color="transparent")
@@ -1124,7 +1177,8 @@ class QuickChat:
             actions, self._capture_menu_label(), self._toggle_capture, icon="\u25cf")
         ctk.CTkFrame(card, height=1, fg_color=self.colors["line"],
                      corner_radius=0).pack(fill="x", padx=18, pady=4)
-        self._add_option(card, "Quit Dockt", self.close, danger=True, icon="\u23fb")
+        self.quit_option = self._add_option(card, "Quit Dockt", self.close, danger=True,
+                                            image=_power_icon(panel, self.colors["error"]))
         ctk.CTkFrame(card, height=5, fg_color="transparent").pack()
 
         panel.update_idletasks()
@@ -1137,11 +1191,20 @@ class QuickChat:
         panel.bind("<FocusOut>", self._options_focus_out, add="+")
         panel.focus_force()
 
+    def _key_panel_corners(self, panel):
+        if os.name != "nt":
+            return
+        try:
+            panel.attributes("-transparentcolor", _corner_key(self.colors))
+        except tk.TclError:
+            pass
+
     def _add_option(self, parent, label: str, action, danger: bool = False,
-                    icon: str = ""):
+                    icon: str = "", image=None):
         colors = self.colors
         button = ctk.CTkButton(
-            parent, text=f"{icon}   {label}" if icon else label,
+            parent, text=f"{icon}   {label}" if icon else (f"  {label}" if image else label),
+            image=image, compound="left",
             anchor="w", height=46, corner_radius=12, border_width=0,
             fg_color="transparent", hover_color=colors["line"],
             text_color=colors["error"] if danger else colors["text"],
