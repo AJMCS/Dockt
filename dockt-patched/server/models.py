@@ -52,8 +52,19 @@ Active app: {app}
 Window title: {title}
 
 Reply in exactly this format:
-SUMMARY: 1-2 sentences on what the person is doing and what is on screen (app, page, document, people, topics).
-TEXT: the most important visible text, verbatim — names, emails, numbers, dates, headings, messages. Max ~150 words. Skip menus and boilerplate."""
+SUMMARY: 1-2 sentences on what the person is doing and what is on screen (app, page, document, people, topics). Don't quote what is typed in an unsent message box.
+TEXT: the most important visible text, verbatim — names, emails, numbers, dates, headings. For chats and emails, write each SENT or RECEIVED message on its own line as "Sender: message" (use "Me" for the person at this screen). Max ~150 words. Skip menus and boilerplate.
+DRAFT: text typed in a message input or compose box that has NOT been sent yet, verbatim; "none" if there is none."""
+
+# describe() keeps returning (summary, text); unsent compose-box text goes after this marker inside text, so search
+# still finds it but the commitment pass can cut it off (a promise typed and deleted was never made)
+DRAFT_MARK = "\n[Draft, not sent] "
+
+
+def split_draft(text: str) -> tuple[str, str]:
+    """(sent / received text, unsent draft) from a capture's screen text."""
+    sent, _, draft = (text or "").partition(DRAFT_MARK)
+    return sent, draft
 
 
 def _strip_think(s: str) -> str:
@@ -72,10 +83,14 @@ async def describe(jpeg: bytes, app: str, title: str) -> tuple[str, str]:
         ]}],
     }
     out = await _complete(VLM_URL, body, no_think=True)
-    m = re.search(r"SUMMARY:\s*(.*?)(?:\n\s*TEXT:|$)", out, re.S | re.I)
-    t = re.search(r"TEXT:\s*(.*)", out, re.S | re.I)
+    m = re.search(r"SUMMARY:\s*(.*?)(?:\n\s*(?:TEXT|DRAFT):|$)", out, re.S | re.I)
+    t = re.search(r"TEXT:\s*(.*?)(?:\n\s*DRAFT:|$)", out, re.S | re.I)
+    d = re.search(r"DRAFT:\s*(.*)", out, re.S | re.I)
     summary = (m.group(1) if m else out).strip()
     text = (t.group(1) if t else "").strip()
+    draft = (d.group(1) if d else "").strip()
+    if draft and not re.fullmatch(r"[\W_]*(?:none|n/?a|empty|nothing)?[\W_]*", draft, re.I):
+        text += DRAFT_MARK + draft
     return summary, text
 
 

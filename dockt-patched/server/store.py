@@ -51,7 +51,32 @@ CREATE TABLE IF NOT EXISTS commitments(
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_commit_ts ON commitments(ts);
+CREATE TABLE IF NOT EXISTS threads(            -- last text the commitment pass read per conversation
+  thread_key TEXT PRIMARY KEY,
+  last_text TEXT DEFAULT '',
+  last_capture_id INTEGER,
+  last_ts REAL
+);
 """
+
+# commitments columns added after the first release; ALTER TABLE so existing databases keep their rows
+COMMIT_COLUMNS = [
+    ("thread_key", "TEXT DEFAULT ''"),          # app + normalized window title: one chat / email thread
+    ("status", "TEXT DEFAULT 'active'"),        # active | cancelled | changed | done
+    ("status_reason", "TEXT DEFAULT ''"),
+    ("status_capture_id", "INTEGER"),           # the capture whose message cancelled / changed it
+    ("status_at", "REAL"),                      # when that capture was seen
+]
+
+
+def thread_key(app, title) -> str:
+    """One conversation across frames: app + window title without unread counts, badges and browser suffixes."""
+    t = (title or "").lower()
+    t = re.sub(r"\(\d+\+?\)|\[\d+\+?\]|\d+ new (?:items?|messages?)", " ", t)
+    t = re.sub(r"\s[-|—–]\s(?:google chrome|microsoft edge|mozilla firefox|safari|brave)$", "", t.strip())
+    t = re.sub(r"^[^\w#@]+", "", t)               # leading bullets / unread dots
+    t = re.sub(r"\s+", " ", t).strip()
+    return f"{(app or '').strip().lower()}|{t}"[:200]
 
 
 def _words(s):
@@ -65,6 +90,15 @@ def _similar(a, b, thresh=0.6):
     return len(wa & wb) / len(wa | wb) >= thresh
 
 FIELDS = "id, device, ts, app, title, summary, ocr, status"
+
+
+def is_repeat(item, thread_items, open_items=()):
+    """An extracted item repeats one we have: same text and owner as anything in its thread (whatever the status:
+    a cancelled request still visible on screen must not come back), or same text as an open item elsewhere.
+    A different owner is a different commitment ("nevermind, I'll do it" moves the task to the speaker)."""
+    text, who = item.get("text") or "", item.get("who") or "me"
+    return (any(_similar(text, t["text"]) and (t["who"] or "me") == who for t in thread_items)
+            or any(_similar(text, t["text"]) for t in open_items))
 
 
 def _absorb_glances(spans, max_glance_s=120):
@@ -102,6 +136,22 @@ class Store:
             except sqlite3.OperationalError:
                 pass  # column already there
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_extracted ON captures(status, extracted)")
+            try:
+                self.db.execute("ALTER TABLE captures ADD COLUMN extract_attempts INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            for col, decl in COMMIT_COLUMNS:
+                try:
+                    self.db.execute(f"ALTER TABLE commitments ADD COLUMN {col} {decl}")
+                except sqlite3.OperationalError:
+                    pass  # column already there
+            self.db.execute("UPDATE commitments SET status='done' WHERE done=1 AND status='active'")
+            for r in self.db.execute(  # give rows from before threads existed their thread
+                    "SELECT m.id, c.app, c.title FROM commitments m JOIN captures c ON c.id = m.capture_id "
+                    "WHERE m.thread_key IS NULL OR m.thread_key = ''").fetchall():
+                self.db.execute("UPDATE commitments SET thread_key=? WHERE id=?",
+                                (thread_key(r["app"], r["title"]), r["id"]))
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_commit_thread ON commitments(thread_key, status)")
             # anything mid-flight when we last stopped goes back in the queue
             self.db.execute("UPDATE captures SET status='pending' WHERE status='processing'")
             # and give up-on rows another go (e.g. errored out during a GX10 outage)
@@ -167,16 +217,24 @@ class Store:
             self.db.commit()
 
     # ---------- commitments ("things you promised") ----------
-    def claim_extract(self, n: int, min_text=40):
-        """Indexed captures the commitment pass hasn't read yet, newest first.
-        Captures with almost no screen text are skipped without an LLM call."""
+    # captures.extracted: 0 = to do, 1 = claimed, 2 = done or skipped, 3 = gave up after repeated failures
+    def claim_extract(self, n: int, min_text=40, settle_s=8.0):
+        """Indexed captures the commitment pass hasn't read yet, OLDEST first (a retraction has to be read after
+        the promise it retracts). Only settled frames: one replaced by the next capture on the same device within
+        settle_s was mid-typing or mid-scroll, so it's skipped without an LLM call; the newest frame waits until it
+        has stayed on screen settle_s. Captures with almost no screen text are skipped too."""
         with self.lock:
             self.db.execute(
                 "UPDATE captures SET extracted=2 WHERE status='done' AND extracted=0 "
                 "AND length(ocr) + length(summary) < ?", (min_text,))
+            self.db.execute(
+                "UPDATE captures SET extracted=2 WHERE status='done' AND extracted=0 AND EXISTS ("
+                "SELECT 1 FROM captures n WHERE n.device = captures.device AND n.ts > captures.ts "
+                "AND n.ts < captures.ts + ?)", (settle_s,))
             rows = self.db.execute(
                 "SELECT id, device, ts, app, title, summary, ocr FROM captures "
-                "WHERE status='done' AND extracted=0 ORDER BY ts DESC LIMIT ?", (n,)).fetchall()
+                "WHERE status='done' AND extracted=0 AND ts <= ? ORDER BY ts ASC LIMIT ?",
+                (time.time() - settle_s, n)).fetchall()
             if rows:
                 self.db.executemany("UPDATE captures SET extracted=1 WHERE id=?",
                                     [(r["id"],) for r in rows])
@@ -188,27 +246,78 @@ class Store:
             self.db.execute("UPDATE captures SET extracted=? WHERE id=?", (2 if ok else 0, cid))
             self.db.commit()
 
+    def extract_failed(self, cid, err, max_attempts=3, count=True):
+        """Back in the queue to try again; after max_attempts real failures, give up (extracted=3).
+        count=False (models unreachable) retries without using up an attempt."""
+        with self.lock:
+            if count:
+                self.db.execute(
+                    "UPDATE captures SET extract_attempts = extract_attempts + 1, "
+                    "extracted = CASE WHEN extract_attempts + 1 >= ? THEN 3 ELSE 0 END WHERE id=?",
+                    (max_attempts, cid))
+            else:
+                self.db.execute("UPDATE captures SET extracted=0 WHERE id=?", (cid,))
+            self.db.commit()
+        print(f"extract failed id={cid} ({'counted' if count else 'models down'}): {str(err)[:200]}")
+
+    def thread_text(self, key):
+        with self.lock:
+            r = self.db.execute("SELECT last_text FROM threads WHERE thread_key=?", (key,)).fetchone()
+        return r["last_text"] if r else None
+
+    def set_thread_text(self, key, text, capture_id, ts):
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO threads(thread_key, last_text, last_capture_id, last_ts) VALUES (?,?,?,?) "
+                "ON CONFLICT(thread_key) DO UPDATE SET last_text=excluded.last_text, "
+                "last_capture_id=excluded.last_capture_id, last_ts=excluded.last_ts",
+                (key, text[:4000], capture_id, ts))
+            self.db.commit()
+
+    def thread_commitments(self, key, since, statuses=("active",), limit=20):
+        q = ",".join("?" * len(statuses))
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT id, capture_id, ts, kind, text, who, due, status, status_reason FROM commitments "
+                f"WHERE thread_key=? AND ts >= ? AND status IN ({q}) ORDER BY ts LIMIT ?",
+                (key, since, *statuses, limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def add_commitments(self, row, items) -> list[dict]:
-        """Insert extracted items, skipping near-duplicates of anything seen in the
-        last 24h on any device (the same Slack message is captured many times)."""
+        """Insert extracted items, skipping repeats (is_repeat) from the last 24h: the same message is captured in
+        many frames and sometimes several windows."""
+        key = thread_key(row.get("app"), row.get("title"))
         added = []
         with self.lock:
-            recent = [r[0] for r in self.db.execute(
-                "SELECT text FROM commitments WHERE ts > ? ORDER BY id DESC LIMIT 300",
-                (row["ts"] - 86400,))]
+            since = row["ts"] - 86400
+            in_thread = [dict(r) for r in self.db.execute(
+                "SELECT text, who FROM commitments WHERE ts > ? AND thread_key = ?", (since, key))]
+            open_elsewhere = [dict(r) for r in self.db.execute(
+                "SELECT text, who FROM commitments WHERE ts > ? AND thread_key != ? AND status = 'active' "
+                "ORDER BY id DESC LIMIT 300", (since, key))]
             for it in items:
                 text = (it.get("text") or "").strip()[:240]
-                if not text or any(_similar(text, t) for t in recent):
+                if not text or is_repeat({**it, "text": text}, in_thread, open_elsewhere):
                     continue
                 cur = self.db.execute(
-                    "INSERT INTO commitments(capture_id, device, ts, kind, text, who, due, created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO commitments(capture_id, device, ts, kind, text, who, due, created_at, thread_key) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
                     (row["id"], row["device"], row["ts"], (it.get("kind") or "promise")[:20],
-                     text, (it.get("who") or "")[:60], (it.get("due") or "")[:60], time.time()))
-                recent.append(text)
+                     text, (it.get("who") or "")[:60], (it.get("due") or "")[:60], time.time(), key))
+                in_thread.append({"text": text, "who": it.get("who") or "me"})
                 added.append({"id": cur.lastrowid, "text": text})
             self.db.commit()
         return added
+
+    def set_commitment_status(self, cid, status, reason, capture_id, ts) -> bool:
+        """Close an open item (cancelled / changed / done) because of what capture_id showed. Only active items."""
+        with self.lock:
+            cur = self.db.execute(
+                "UPDATE commitments SET status=?, status_reason=?, status_capture_id=?, status_at=?, "
+                "done = CASE WHEN ?='done' THEN 1 ELSE done END WHERE id=? AND status='active'",
+                (status, (reason or "")[:200], capture_id, ts, status, cid))
+            self.db.commit()
+            return cur.rowcount > 0
 
     def commitments(self, start=None, end=None, device=None, include_done=True, limit=200):
         where, args = ["1=1"], []
@@ -218,18 +327,22 @@ class Store:
             where.append("ts < ?"); args.append(end)
         if device:
             where.append("device = ?"); args.append(device)
-        if not include_done:
-            where.append("done = 0")
+        if not include_done:  # open items only
+            where.append("done = 0 AND status = 'active'")
         with self.lock:
             rows = self.db.execute(
-                f"SELECT id, capture_id, device, ts, kind, text, who, due, done, created_at "
+                f"SELECT id, capture_id, device, ts, kind, text, who, due, done, created_at, "
+                f"thread_key, status, status_reason, status_capture_id, status_at "
                 f"FROM commitments WHERE {' AND '.join(where)} ORDER BY ts DESC LIMIT ?",
                 args + [limit]).fetchall()
         return [dict(r) for r in rows]
 
     def set_commitment_done(self, cid, done):
+        """The checkbox. Cancelled / changed items keep their status; done <-> active otherwise."""
         with self.lock:
-            self.db.execute("UPDATE commitments SET done=? WHERE id=?", (1 if done else 0, cid))
+            self.db.execute(
+                "UPDATE commitments SET done=?, status = CASE WHEN status IN ('active','done') "
+                "THEN ? ELSE status END WHERE id=?", (1 if done else 0, "done" if done else "active", cid))
             self.db.commit()
 
     def agent_ping(self, device, session, checks, sent):

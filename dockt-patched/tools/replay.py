@@ -5,6 +5,7 @@ capture breaks, replay a backup folder you recorded earlier.
 
   python replay.py --server http://localhost:8000 --folder ./backup --name demo-laptop
   python replay.py --server http://localhost:8000 --synthetic 40
+  python replay.py --server http://localhost:8000 --scenario all     # retraction + deleted-draft test threads
 
 Timestamps come from file modified times (or are spread over the last hour).
 Window title = file name unless a sibling .json {"app":..,"title":..} exists.
@@ -43,6 +44,49 @@ def synth(app, title):
     return buf.getvalue()
 
 
+# Commitment test threads: (seconds from start, app, title, sent/received messages, unsent text in the compose box).
+# Frames < 8 s apart (EXTRACT_SETTLE_S) are mid-typing and should be skipped; repeats should cost no extraction.
+SCENARIOS = {
+    "retraction": [  # a request, repeated frames of it, then the requester takes it back
+        (0, "Slack", "#design | Acme — Slack", "Alex: can you send the deck to Sarah by Friday?", ""),
+        (3, "Slack", "#design | Acme — Slack", "Alex: can you send the deck to Sarah by Friday?", ""),
+        (20, "Slack", "(1) #design | Acme — Slack", "Alex: can you send the deck to Sarah by Friday?", ""),
+        (62, "Slack", "#design | Acme — Slack",
+         "Alex: can you send the deck to Sarah by Friday?\nAlex: actually nevermind, I've got it", ""),
+        (65, "Slack", "#design | Acme — Slack",
+         "Alex: can you send the deck to Sarah by Friday?\nAlex: actually nevermind, I've got it", ""),
+        (90, "Slack", "#design | Acme — Slack",
+         "Alex: can you send the deck to Sarah by Friday?\nAlex: actually nevermind, I've got it", ""),
+    ],
+    "draft": [  # a promise typed in the compose box, left there a while, then deleted without sending
+        (200, "Slack", "#launch | Acme — Slack", "Jordan: are we still on for the launch review tomorrow?",
+         "I'll send the launch checklist to Jordan by tomorrow"),
+        (215, "Slack", "#launch | Acme — Slack", "Jordan: are we still on for the launch review tomorrow?",
+         "I'll send the launch checklist to Jordan by tomorrow"),
+        (217, "Slack", "#launch | Acme — Slack", "Jordan: are we still on for the launch review tomorrow?",
+         "I'll send the launch checklist"),
+        (219, "Slack", "#launch | Acme — Slack", "Jordan: are we still on for the launch review tomorrow?", "I'll send"),
+        (240, "Slack", "#launch | Acme — Slack", "Jordan: are we still on for the launch review tomorrow?", ""),
+    ],
+}
+
+
+def chat_frame(app, title, text, draft):
+    """A chat window: messages drawn as pixels for a real vision model, plus the same content as JSON in the
+    JPEG comment for tools/mock_models.py (which can't read pixels)."""
+    img = Image.new("RGB", (1280, 800), (245, 246, 248))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, 1280, 40], fill=(40, 44, 52))
+    d.text((16, 12), f"{app}  —  {title}", fill=(255, 255, 255))
+    for i, line in enumerate(text.splitlines()):
+        d.text((40, 80 + 40 * i), line, fill=(30, 30, 30))
+    d.rectangle([30, 700, 1250, 770], outline=(120, 120, 120), width=2)   # the message box
+    d.text((44, 728), draft or "Message #channel", fill=(30, 30, 30) if draft else (150, 150, 150))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=80, comment=json.dumps({"text": text, "draft": draft}))
+    return buf.getvalue()
+
+
 def post(server, token, jpeg, meta):
     r = requests.post(server.rstrip("/") + "/ingest", timeout=10,
                       headers={"X-Dockt-Token": token} if token else {},
@@ -59,9 +103,19 @@ def main():
     ap.add_argument("--folder")
     ap.add_argument("--synthetic", type=int, default=0)
     ap.add_argument("--delay", type=float, default=0.0, help="seconds between posts")
+    ap.add_argument("--scenario", choices=[*SCENARIOS, "all"], help="post commitment test threads")
     a = ap.parse_args()
 
     now = time.time()
+    if a.scenario:   # placed in the recent past so every frame has already settled
+        frames = sorted(f for k, v in SCENARIOS.items() if a.scenario in (k, "all") for f in v)
+        start = now - 60 - max(f[0] for f in frames)
+        for dt, app, title, text, draft in frames:
+            cid = post(a.server, a.token, chat_frame(app, title, text, draft),
+                       {"device": a.name, "ts": start + dt, "app": app, "title": title})
+            print(cid, f"+{dt}s", title, "|", text.splitlines()[-1][:50], "| draft:", draft[:30] or "-")
+            time.sleep(a.delay)
+        return
     if a.synthetic:
         for i in range(a.synthetic):
             app, title = SCENES[i % len(SCENES)]

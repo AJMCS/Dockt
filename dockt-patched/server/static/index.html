@@ -234,7 +234,11 @@
   #promises { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
   #promises li { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: flex-start; padding: 9px 12px; border-radius: 10px; transition: background .15s; }
   #promises li:hover { background: var(--hover); }
-  #promises li.done .ptext { text-decoration: line-through; color: var(--muted); }
+  #promises li.done .ptext, #promises li.closed .ptext { text-decoration: line-through; color: var(--muted); }
+  /* cancelled / changed by a later message: why, when, and the capture that showed it */
+  .pwhy { flex-basis: 100%; margin: -2px 0 0 28px; font-size: 12.5px; color: var(--muted); }
+  .pwhy b { font-weight: 600; color: var(--warn-text); text-transform: capitalize; }
+  #promises li.closed input { visibility: hidden; }
   #promises li.new { animation: pop 1.2s ease-out; }
   @keyframes pop { 0% { background: var(--accent-soft); } 100% { background: transparent; } }
   #promises input { appearance: none; -webkit-appearance: none; flex: none; width: 16px; height: 16px; margin: 3px 0 0; border: 1.5px solid var(--muted);
@@ -902,16 +906,18 @@ async function refreshPromises() {
     const r = await api("/api/commitments?hours=48" + devParam());
     const ul = $("#promises");
     if (!r.items.length) { ul.innerHTML = `<li class="empty">Nothing found yet — it shows up here within a minute of being on screen.</li>`; return; }
-    ul.innerHTML = r.items.map(c => `<li class="${c.done ? "done" : ""} ${promisesLoaded && !seenPromises.has(c.id) ? "new" : ""}" data-id="${c.id}">
+    const closed = c => c.status === "cancelled" || c.status === "changed";
+    ul.innerHTML = r.items.map(c => `<li class="${closed(c) ? "closed" : c.done ? "done" : ""} ${promisesLoaded && !seenPromises.has(c.id) ? "new" : ""}" data-id="${c.id}">
         <input type="checkbox" ${c.done ? "checked" : ""} title="mark done">
         <span class="kind ${esc(c.kind)}">${esc(c.kind)}</span>
         <span class="ptext">${esc(c.text)}${c.due ? ` <span class="meta">· due ${esc(c.due)}</span>` : ""}${c.who && c.who !== "me" ? ` <span class="meta">· ${esc(c.who)}</span>` : ""}</span>
         <span class="meta">${fmt(c.ts)} · ${esc(c.device)}</span>
         <span class="cite" data-id="${c.capture_id}">#${c.capture_id}</span>
+        ${closed(c) ? `<span class="pwhy"><b>${esc(c.status)}</b>${c.status_at ? ` ${fmt(c.status_at)}` : ""}${c.status_reason ? ` · “${esc(c.status_reason)}”` : ""}${c.status_capture_id ? ` <span class="cite" data-id="${c.status_capture_id}">#${c.status_capture_id}</span>` : ""}</span>` : ""}
       </li>`).join("");
     r.items.forEach(c => seenPromises.add(c.id));
     promisesLoaded = true;
-    const open = r.items.filter(c => !c.done).length;
+    const open = r.items.filter(c => !c.done && !closed(c)).length;
     $("#promHint").textContent = `· ${open} open`;
     $("#promCount").textContent = open || "";
   } catch {}
