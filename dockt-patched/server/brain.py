@@ -412,6 +412,10 @@ def _time_hint(q):
             f"Plans and events for this period were usually seen earlier: search for them without start/end.)")
 
 
+_NEGATIVE = re.compile(r"didn'?t see|not(?:hing)? (?:found|on your screens)|"
+                       r"no (?:requests?|results?|matching|record|information)", re.I)
+
+
 def _finish(answer, sources):
     """Normalize [9] -> [#9] for ids we actually returned, drop [#id]s no tool returned,
     then cited = ids in the answer ∩ sources."""
@@ -421,8 +425,7 @@ def _finish(answer, sources):
                     answer)
     answer = re.sub(r"\s?\[#(\d+)\]", lambda m: m.group(0) if int(m.group(1)) in sources else "", answer)
     # a "didn't see / nothing found" answer shouldn't carry citations, even if the model tacked some on
-    if re.search(r"didn'?t see|not(?:hing)? (?:found|on your screens)|no (?:requests?|results?|matching)",
-                 answer, re.I):
+    if _NEGATIVE.search(answer):
         answer = re.sub(r"\s?\[#\d+\]", "", answer)
     cited = [i for i in dict.fromkeys(int(x) for x in re.findall(r"\[#(\d+)\]", answer)) if i in sources]
     ordered = [sources[i] for i in cited] + [r for i, r in sources.items() if i not in cited]
@@ -442,6 +445,8 @@ async def _agent(req: ChatReq):
 
     sources: dict[int, dict] = {}
     drafted: list[int] = []  # captures a draft was built from; the model tends to drop their citations
+    searched = False         # did the model ever actually search the screens?
+    forced = False           # have we already forced one fallback search?
     answer = ""
     for rnd in range(CHAT_MAX_ROUNDS + 1):
         last = rnd == CHAT_MAX_ROUNDS
@@ -451,11 +456,26 @@ async def _agent(req: ChatReq):
         calls = out.get("tool_calls") or []
         if not calls:
             answer = (out.get("content") or "").strip()
+            # the model gave up without ever searching — do one keyword search for it, then let it answer again
+            if not last and not forced and not searched and _NEGATIVE.search(answer):
+                forced = True
+                q = history[-1].content
+                yield {"type": "status", "text": _tool_status("search_screens", {"q": q})}
+                result = await _run_tool("search_screens", {"q": q}, req.device, sources)
+                searched = True
+                print(f"chat tool search_screens(fallback {q!r}) -> {len(result)} chars")
+                msgs.append({"role": "assistant", "content": "", "tool_calls": [{
+                    "id": "call_fallback", "type": "function",
+                    "function": {"name": "search_screens", "arguments": json.dumps({"q": q})}}]})
+                msgs.append({"role": "tool", "tool_call_id": "call_fallback", "content": result[:TOOL_MAX_CHARS]})
+                continue
             break
         msgs.append({"role": "assistant", "content": out.get("content") or "", "tool_calls": [
             {"id": c["id"], "type": "function",
              "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
         for c in calls:
+            if c["name"] == "search_screens":
+                searched = True
             yield {"type": "status", "text": _tool_status(c["name"], c["arguments"])}
             try:
                 result = await _run_tool(c["name"], c["arguments"], req.device, sources)
