@@ -27,6 +27,8 @@ Ollama settings: `OLLAMA_HOST=0.0.0.0` (so laptops can reach it), `OLLAMA_CONTEX
 
 Check from a laptop: `curl http://<gx10-ip>:11434/v1/models`. Measure vision throughput with `python tools/bench.py --url http://<gx10-ip>:11434/v1 --model gemma4:26b`. The total captures/min from all laptops must stay under what the GX10 can read, about 28 img/min with extraction running.
 
+**GX10 over SSH (campus Wi-Fi):** if the laptop can't reach the GX10's port 11434 directly, double-click `desktop\Setup-GX10.bat` once. It asks for the GX10 login (e.g. `asus@169.233.72.21`), creates an SSH key for this laptop, adds it to the GX10 (asks for the GX10 password once), and writes the login to `gx10.txt`. From then on the launcher sees `user@address` in `gx10.txt` and keeps an SSH tunnel to the GX10's Ollama open on `127.0.0.1:11435` while Dockt runs, reconnecting if the Wi-Fi drops (log: `~/.dockt/logs/tunnel.log`). A plain address in `gx10.txt` (e.g. on our own router) still connects directly.
+
 ## Running without the GX10 (mock models)
 
 **Windows:** `start-dockt.bat --mock`. **By hand** (any OS; on Windows use `.venv\Scripts\` and `$env:VLM_URL=...`):

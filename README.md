@@ -57,6 +57,8 @@ echo 192.168.8.10> gx10.txt        # your GX10's address (or set DOCKT_GX10)
 start-dockt.bat                     # first run sets up .venv; add --mock to run without a GX10
 ```
 
+On campus Wi-Fi, where the GX10's port can't be reached directly, run `desktop\Setup-GX10.bat` once instead; Dockt then reaches the GX10 through an SSH tunnel.
+
 This starts the local service, screen capture and the quick-chat pet. Right-click the pet for controls: **Open Dashboard**, pause or resume capture, and **Quit Dockt**. Click the pet or press `Ctrl+Space` to ask a quick question. Closing the dashboard window hides it; Quit ends everything.
 
 **Developing on macOS/Linux (mock models, no GX10 needed):**
