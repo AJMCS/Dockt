@@ -52,6 +52,8 @@ shutdown_requested = threading.Event()
 stopping = threading.Event()   # set by stop_children so the tunnel watchdog doesn't reconnect
 _instance_lock_handle = None
 pending_hash = ""
+pending_show = False
+window_ready = threading.Event()
 
 
 # ---------- helpers ----------
@@ -267,9 +269,10 @@ class Control(BaseHTTPRequestHandler):
 
 
 def show(window, h: str):
-    global pending_hash
+    global pending_hash, pending_show
     pending_hash = h
-    if window is None:
+    pending_show = True
+    if window is None or not window_ready.is_set():
         return
     try:
         window.restore()
@@ -349,6 +352,10 @@ animation:p 1.2s ease-in-out infinite}@keyframes p{50%{opacity:.25}}
 
 def boot(window, h: str, server: subprocess.Popen | None):
     """Runs once the window exists: point it at the dashboard as soon as the service answers."""
+    window_ready.set()
+    if shutdown_requested.is_set():
+        window.destroy()
+        return
     if os.name == "nt":   # window icon; the native form only exists once pywebview has shown it
         try:
             from System.Drawing import Icon   # pythonnet, installed with pywebview on Windows
@@ -363,15 +370,20 @@ def boot(window, h: str, server: subprocess.Popen | None):
             return
         time.sleep(0.4)
     window.load_url(BASE + "/" + (pending_hash or h))
+    if pending_show or h:
+        show(window, pending_hash or h)
 
 
 def main():
+    global pending_hash, pending_show
     ap = argparse.ArgumentParser(description="Dockt in a native window")
     ap.add_argument("--mock", action="store_true", help="use tools/mock_models.py instead of the GX10")
     ap.add_argument("--no-capture", action="store_true", help="don't start agent/capture.py")
     ap.add_argument("--open", default="", help='link to show, e.g. "#/capture/3" or "#/chat?q=hello"')
     args = ap.parse_args()
     h = clean_hash(args.open)
+    pending_hash, pending_show = h, bool(h)
+    window_ready.clear()
 
     if hand_off(h):   # already running: it shows the link, we're done
         return
@@ -420,6 +432,7 @@ def main():
             control.shutdown()
             control.server_close()
         Control.window = None
+        window_ready.clear()
         stop_children()
 
 

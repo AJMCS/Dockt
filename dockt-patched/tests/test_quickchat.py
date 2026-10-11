@@ -76,7 +76,11 @@ class QuickChatTests(unittest.TestCase):
 
     def test_dashboard_is_temporarily_raised_when_opened(self):
         window = Mock()
-        dockt_desktop.show(window, "")
+        dockt_desktop.window_ready.set()
+        try:
+            dockt_desktop.show(window, "")
+        finally:
+            dockt_desktop.window_ready.clear()
         window.restore.assert_called_once_with()
         window.show.assert_called_once_with()
         self.assertTrue(window.on_top)
@@ -91,8 +95,35 @@ class QuickChatTests(unittest.TestCase):
             @on_top.setter
             def on_top(self, _value): raise NotImplementedError("unsupported here")
         window = Window()
-        dockt_desktop.show(window, "")
+        dockt_desktop.window_ready.set()
+        try:
+            dockt_desktop.show(window, "")
+        finally:
+            dockt_desktop.window_ready.clear()
         self.assertTrue(window.was_shown)
+
+    def test_dashboard_open_is_queued_while_webview_starts(self):
+        previous = dockt_desktop.Control.window
+        dockt_desktop.Control.window = Mock()
+        dockt_desktop.window_ready.clear()
+        dockt_desktop.pending_show = False
+        server = ThreadingHTTPServer(("127.0.0.1", 0), dockt_desktop.Control)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_port}/open?hash=%23%2Fconversation%2Fabc",
+                         timeout=1) as response:
+                self.assertEqual(response.status, 200)
+            dockt_desktop.Control.window.restore.assert_not_called()
+            self.assertTrue(dockt_desktop.pending_show)
+            self.assertEqual(dockt_desktop.pending_hash, "#/conversation/abc")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            dockt_desktop.Control.window = previous
+            dockt_desktop.pending_hash = ""
+            dockt_desktop.pending_show = False
 
     def test_desktop_lock_rejects_a_second_process_and_releases_on_exit(self):
         with tempfile.TemporaryDirectory() as directory:
