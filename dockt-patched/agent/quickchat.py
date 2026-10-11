@@ -368,12 +368,12 @@ class QuickChat:
         self.colors = PALETTES[theme]
         self._style()
         self._recolor_tree(self.root, previous, self.colors)
-        self.transcript.configure(bg=self.colors["surface"], fg=self.colors["text"],
+        self.transcript.configure(bg=self.colors["bg"], fg=self.colors["text"],
                                   insertbackground=self.colors["text"])
         self.transcript.tag_configure("user", foreground=self.colors["text"])
         self.transcript.tag_configure("user_body", foreground=self.colors["text"],
-                                      background=self.colors["accent_soft"])
-        self.transcript.tag_configure("assistant", foreground=self.colors["accent_text"])
+                                      background=self.colors["surface2"])
+        self.transcript.tag_configure("assistant", foreground=self.colors["muted"])
         self.transcript.tag_configure("assistant_body", foreground=self.colors["text"])
         self.transcript.tag_configure("error", foreground=self.colors["error"])
         self.entry._textbox.configure(insertbackground=self.colors["text"])
@@ -398,7 +398,7 @@ class QuickChat:
         frame = content
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
-        header = ctk.CTkFrame(frame, fg_color="transparent", height=32)
+        header = ctk.CTkFrame(frame, fg_color="transparent", height=36)
         header.grid(row=0, column=0, sticky="ew")
         brand = ctk.CTkFrame(header, fg_color="transparent", height=1)
         brand.pack(side="left")
@@ -406,25 +406,25 @@ class QuickChat:
                      font=("Segoe UI", 20, "bold")).pack(side="left")
         ctk.CTkLabel(brand, text=".", text_color=self.colors["accent"],
                      font=("Segoe UI", 20, "bold")).pack(side="left")
-        ctk.CTkLabel(header, text="QUICK CHAT", text_color=self.colors["accent_text"],
-                     fg_color=self.colors["accent_soft"], corner_radius=9,
-                     padx=9, pady=4, font=("Segoe UI", 9, "bold")).pack(
-            side="left", padx=(12, 0), pady=(4, 0))
-        ctk.CTkLabel(header, text="Ctrl + Space", text_color=self.colors["muted"],
-                     fg_color=self.colors["surface2"], corner_radius=9,
-                     padx=9, pady=4, font=("Segoe UI", 9)).pack(
-            side="right", pady=(4, 0))
+        ctk.CTkLabel(header, text="● Local AI", text_color=self.colors["accent_text"],
+                     fg_color=self.colors["accent_soft"], corner_radius=10,
+                     padx=10, pady=5, font=("Segoe UI", 9, "bold")).pack(
+            side="left", padx=(12, 0), pady=(3, 0))
+        ctk.CTkLabel(header, text="Ctrl + Space to hide", text_color=self.colors["muted"],
+                     fg_color=self.colors["surface2"], corner_radius=10,
+                     padx=10, pady=5, font=("Segoe UI", 9)).pack(
+            side="right", pady=(3, 0))
 
         transcript_card = ctk.CTkFrame(
-            frame, fg_color=self.colors["surface"], corner_radius=16, height=1)
+            frame, fg_color="transparent", corner_radius=0, height=1)
         transcript_card.grid(row=1, column=0, sticky="nsew", pady=(12, 8))
         self.transcript = tk.Text(transcript_card, wrap="word", height=1, state="disabled",
-                                  bg=self.colors["surface"], fg=self.colors["text"],
+                                  bg=self.colors["bg"], fg=self.colors["text"],
                                   insertbackground=self.colors["text"],
-                                  relief="flat", padx=10, pady=10, font=("Segoe UI", 12),
-                                  spacing1=2, spacing3=10, highlightthickness=0,
+                                  relief="flat", padx=18, pady=10, font=("Segoe UI", 12),
+                                  spacing1=2, spacing3=14, highlightthickness=0,
                                   takefocus=False)
-        self.transcript.pack(side="left", fill="both", expand=True, padx=(9, 0), pady=8)
+        self.transcript.pack(side="left", fill="both", expand=True)
         transcript_scrollbar = ctk.CTkScrollbar(
             transcript_card, orientation="vertical", command=self.transcript.yview,
             width=8, corner_radius=5, fg_color=self.colors["surface"],
@@ -432,56 +432,59 @@ class QuickChat:
             button_hover_color=self.colors["accent"])
         transcript_scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
         self.transcript.configure(yscrollcommand=transcript_scrollbar.set)
-        self.transcript.tag_configure("user", foreground=self.colors["text"],
-                                      font=("Segoe UI", 10, "bold"), justify="right",
-                                      spacing1=10)
+        self.transcript.tag_configure("user", foreground=self.colors["muted"],
+                                      font=("Segoe UI", 9, "bold"), justify="right",
+                                      spacing1=8)
         self.transcript.tag_configure("user_body", foreground=self.colors["text"],
-                                      background=self.colors["accent_soft"],
-                                      font=("Segoe UI", 11), justify="right",
+                                      background=self.colors["surface2"],
+                                      font=("Segoe UI", 11), justify="left",
                                       lmargin1=72, lmargin2=72, rmargin=10,
-                                      spacing1=6, spacing3=16)
-        self.transcript.tag_configure("assistant", foreground=self.colors["accent_text"],
-                                      font=("Segoe UI", 10, "bold"), spacing1=8)
+                                      spacing1=8, spacing3=16)
+        self.transcript.tag_configure("assistant", foreground=self.colors["muted"],
+                                      font=("Segoe UI", 9, "bold"), spacing1=8)
         self.transcript.tag_configure("assistant_body", foreground=self.colors["text"],
-                                      font=("Segoe UI", 12), lmargin1=2, lmargin2=2,
-                                      rmargin=28, spacing1=2, spacing3=10)
+                                      font=("Georgia", 12), lmargin1=2, lmargin2=2,
+                                      rmargin=28, spacing1=2, spacing3=12)
         self.transcript.tag_configure("error", foreground=self.colors["error"])
         self.transcript.bind("<Configure>", self._resize_message_margins, add="+")
 
         self.thumbnail_row = ctk.CTkFrame(frame, fg_color="transparent", height=1)
         self.thumbnail_row.grid(row=2, column=0, sticky="ew", pady=(0, 7))
 
-        composer = ctk.CTkFrame(frame, fg_color="transparent", height=1)
+        composer = ctk.CTkFrame(frame, fg_color=self.colors["surface"], height=1,
+                                corner_radius=20, border_width=1,
+                                border_color=self.colors["line"])
         composer.grid(row=3, column=0, sticky="ew")
+        composer.pack_propagate(False)
         composer.columnconfigure(0, weight=1)
         self.entry = ctk.CTkTextbox(composer, height=44, wrap="word", activate_scrollbars=False,
-                                     corner_radius=14, border_width=1,
-                                     border_color=self.colors["line"], fg_color=self.colors["surface"],
+                                     corner_radius=14, border_width=0,
+                                     border_color=self.colors["line"], fg_color="transparent",
                                      text_color=self.colors["text"], font=("Segoe UI", 11),
                                      undo=True)
-        self.entry._textbox.configure(insertbackground=self.colors["text"], padx=12, pady=9)
+        self.entry._textbox.configure(insertbackground=self.colors["text"], padx=14, pady=11)
         self.entry._textbox.tag_configure("placeholder", foreground=self.colors["muted"])
         self.placeholder_visible = True
         self.entry.insert("1.0", COMPOSER_PLACEHOLDER, "placeholder")
         self.entry.edit_modified(False)
-        self.entry.grid(row=0, column=0, sticky="ew")
+        self.entry.grid(row=0, column=0, sticky="ew", padx=(4, 0), pady=4)
         self.entry.bind("<Return>", self.submit)
         self.entry.bind("<Shift-Return>", lambda _event: None)
         self.entry.bind("<<Modified>>", self._composer_modified, add="+")
         self.entry.bind("<FocusIn>", self._clear_composer_placeholder, add="+")
         self.entry.bind("<FocusOut>", self._show_composer_placeholder, add="+")
         self.entry.bind("<Button-1>", self._entry_clicked, add="+")
-        self.ask_button = ctk.CTkButton(composer, text="Send", width=78, height=42,
-                                        corner_radius=13, fg_color=self.colors["accent"],
+        self.ask_button = ctk.CTkButton(composer, text="↑", width=36, height=36,
+                                        corner_radius=18, fg_color=self.colors["accent"],
                                         hover_color="#6AA600", text_color=self.colors["on_accent"],
-                                        font=("Segoe UI", 11, "bold"), command=self.submit)
-        self.ask_button.grid(row=0, column=1, padx=(8, 0), sticky="s")
+                                        font=("Segoe UI", 18, "bold"), command=self.submit)
+        self.ask_button.grid(row=0, column=1, padx=(4, 8), pady=7, sticky="s")
         self.retry_button = ctk.CTkButton(
             composer, text="Retry", command=self.retry_latest, width=76, height=42,
             corner_radius=13, fg_color=self.colors["surface2"],
             hover_color=self.colors["line"], text_color=self.colors["text"],
             font=("Segoe UI", 10, "bold"))
-        self.retry_button.grid(row=0, column=2, padx=(6, 0), sticky="s")
+        self.retry_button.grid(row=0, column=2, padx=(0, 8), pady=7, sticky="s")
         self.retry_button.grid_remove()
 
         footer = ctk.CTkFrame(frame, fg_color="transparent", height=1)
@@ -553,8 +556,9 @@ class QuickChat:
 
     def _resize_message_margins(self, _event=None):
         width = max(1, self.transcript.winfo_width())
-        margin = min(112, max(40, round(width * 0.18)))
-        self.transcript.tag_configure("user_body", lmargin1=margin, lmargin2=margin)
+        left_margin = min(150, max(54, round(width * 0.2)))
+        self.transcript.tag_configure("user_body", lmargin1=left_margin,
+                                      lmargin2=left_margin, rmargin=10)
 
     def _create_pet(self):
         self.pet = tk.Toplevel(self.root)
