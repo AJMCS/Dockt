@@ -239,6 +239,45 @@ def test_source_card_opens_modal_and_hover_highlights(dash):
     dash.page.wait_for_selector("#modal", state="visible")
 
 
+@pytest.mark.viewport(1440, 900)
+def test_screenshot_window_resizes_maximizes_and_sits_above_the_sidebar(dash):
+    dash.open().ask("where is dinner tonight")
+    dash.page.locator("#thread .cite").first.click()
+    dash.page.wait_for_selector("#modal", state="visible")
+    box = lambda: dash.page.locator("#modal .box").bounding_box()
+    # nothing (the sidebar especially) covers the screenshot's left edge
+    b = box()
+    assert dash.page.evaluate(f"document.elementFromPoint({b['x'] + 20}, {b['y'] + 60}).closest('#modal') !== null")
+
+    def drag(sel, dx, dy):
+        g = dash.page.locator(sel).bounding_box()
+        x, y = g["x"] + g["width"] / 2, g["y"] + g["height"] / 2
+        dash.page.mouse.move(x, y)
+        dash.page.mouse.down()
+        dash.page.mouse.move(x + dx, y + dy, steps=6)
+        dash.page.mouse.up()
+
+    drag('.m-rs[data-dir="se"]', -150, -100)
+    small = box()
+    assert small["width"] <= b["width"] - 280 and abs(small["height"] - (b["height"] - 100)) < 4
+    assert dash.page.locator("#modal").is_visible(), "a drag that ends over the backdrop must not close the window"
+    shot_w = lambda: dash.page.locator("#modal .shot").bounding_box()["width"]
+    before = shot_w()
+    drag(".m-split", -120, 0)
+    assert shot_w() < before - 100, "the divider moves the split between screenshot and details"
+    dash.page.click("#mMax")
+    assert box()["width"] > 1300 and box()["height"] > 750
+    dash.page.click("#mMax")
+    assert abs(box()["width"] - small["width"]) < 2, "restore goes back to the dragged size"
+    dash.page.click("#mClose")
+    assert dash.page.locator("#modal").is_hidden()
+    dash.page.locator("#thread .cite").first.click()
+    dash.page.wait_for_selector("#modal", state="visible")
+    assert abs(box()["width"] - small["width"]) < 2, "the size is remembered"
+    dash.page.dblclick('.m-rs[data-dir="se"]')
+    assert abs(box()["width"] - b["width"]) < 2, "double-click resets the size"
+
+
 # ---------------------------------------------------------------- deep links (Lane 1 depends on these)
 def test_deep_link_capture_on_load_and_hashchange(dash):
     dash.open("/#/capture/3")

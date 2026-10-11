@@ -246,11 +246,37 @@
   .tlaxis span { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; }
 
   /* modal */
-  #modal { display: none; position: fixed; inset: 0; background: var(--backdrop); z-index: 10; padding: 48px 24px; overflow-y: auto; }
-  #modal .box { max-width: 1100px; margin: 0 auto; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow);
-                overflow: hidden; display: grid; grid-template-columns: 1.6fr 1fr; }
+  #modal { display: none; position: fixed; inset: 0; background: var(--backdrop); z-index: 30; padding: 48px 24px; overflow-y: auto; }
+  /* a resizable window: drag the right/bottom edges or the corner (it stays centred), drag the divider between
+     screenshot and details, or maximize. --m-w / --m-h / --m-split are set by the handles and remembered. */
+  #modal .box { position: relative; width: var(--m-w, 1100px); max-width: 100%; height: var(--m-h, auto); margin: 0 auto;
+                background: var(--surface); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow);
+                overflow: hidden; display: grid; grid-template-columns: minmax(0, var(--m-split, 61.5%)) minmax(0, 1fr); }
+  #modal .box.max { width: 100%; height: calc(100vh - 96px); }
+  #modal .shot { min-height: 0; overflow: auto; background: var(--img-bg); }
   #modal img { width: 100%; display: block; background: var(--img-bg); }
   #modal .side { padding: 22px; max-height: 85vh; overflow-y: auto; border-left: 1px solid var(--line); }
+  #mMeta { padding-right: 72px; }
+  /* once the window has a height, the screenshot scales to fit it and the details scroll beside it */
+  #modal .box.sized, #modal .box.max { grid-template-rows: minmax(0, 1fr); }
+  #modal .sized img, #modal .max img { height: 100%; object-fit: contain; object-position: top; }
+  #modal .sized .side, #modal .max .side { max-height: none; }
+  .m-tools { position: absolute; top: 10px; right: 10px; display: flex; gap: 2px; z-index: 3; }
+  .m-tools .btn.icon { width: 30px; height: 30px; color: var(--muted); background: var(--surface); }
+  .m-tools .btn.icon:hover { color: var(--text); background: var(--hover); }
+  .m-tools .i-restore, .max .m-tools .i-max { display: none; } .max .m-tools .i-restore { display: inline; }
+  .m-rs { position: absolute; z-index: 2; touch-action: none; }
+  .m-rs[data-dir="e"] { top: 0; right: 0; bottom: 14px; width: 8px; cursor: ew-resize; }
+  .m-rs[data-dir="s"] { left: 0; right: 14px; bottom: 0; height: 8px; cursor: ns-resize; }
+  .m-rs[data-dir="se"] { right: 0; bottom: 0; width: 18px; height: 18px; cursor: nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, var(--muted) 50%, var(--muted) 56%, transparent 56%, transparent 68%, var(--muted) 68%, var(--muted) 74%, transparent 74%); opacity: .55; }
+  .m-rs[data-dir="se"]:hover { opacity: 1; }
+  .m-split { position: absolute; top: 0; bottom: 0; left: var(--m-split, 61.5%); width: 10px; margin-left: -5px; cursor: col-resize; z-index: 2; touch-action: none; }
+  .m-split::after { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .15s; }
+  .m-split:hover::after, body.m-resizing .m-split.on::after { background: var(--accent); }
+  .max .m-rs { display: none; }
+  body.m-resizing { -webkit-user-select: none; user-select: none; }
+  body.m-resizing #modal img { pointer-events: none; }
   #modal h3 { margin: 22px 0 8px; font-size: 13px; }
   #mSum { font: 16px/1.6 var(--serif); }
   #modal pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 var(--mono); color: var(--muted); background: var(--recess);
@@ -282,7 +308,11 @@
     .topbar .icon.mobile-only { display: grid; }
     .topbar .local.mobile-only { display: inline-block; }
   }
-  @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal .side { border-left: 0; border-top: 1px solid var(--line); max-height: none; } #modal { padding: 16px; } }
+  @media (max-width: 800px) {
+    #modal .box, #modal .box.max { grid-template-columns: 1fr; grid-template-rows: none; width: auto; height: auto; }
+    #modal .side { border-left: 0; border-top: 1px solid var(--line); max-height: none; } #modal { padding: 16px; }
+    #modal img { height: auto; } .m-rs, .m-split, #mMax { display: none; }
+  }
   @media (max-width: 600px) {
     #thread { padding: 12px 16px 16px; } .searchrow { width: calc(100% - 24px); margin-bottom: 12px; }
     .msg.user { max-width: 90%; } .msg.bot { font-size: 16px; }
@@ -366,7 +396,13 @@
 </div>
 
 <div id="modal"><div class="box">
-  <img id="mImg" alt="">
+  <div class="m-tools">
+    <button class="btn icon" id="mMax" title="Maximize" aria-label="Maximize"><svg class="i-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/></svg><svg class="i-restore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10h-6V4M4 14h6v6M14 10l6.5-6.5M10 14l-6.5 6.5"/></svg></button>
+    <button class="btn icon" id="mClose" title="Close (Esc)" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="m-split" title="Drag to resize · double-click to reset"></div>
+  <div class="m-rs" data-dir="e"></div><div class="m-rs" data-dir="s"></div><div class="m-rs" data-dir="se" title="Drag to resize · double-click to reset"></div>
+  <div class="shot"><img id="mImg" alt=""></div>
   <div class="side">
     <div class="meta" id="mMeta"></div>
     <h3>What's on screen</h3>
@@ -883,9 +919,63 @@ async function openModal(id) {
   $("#mActions").innerHTML = draftButtons("modal");
   $("#draft").style.display = "none";
   $("#modal").style.display = "block";
+  applyModalSize();
 }
-$("#modal").addEventListener("click", e => { if (e.target.id === "modal") $("#modal").style.display = "none"; });
-document.addEventListener("keydown", e => { if (e.key === "Escape") $("#modal").style.display = "none"; });
+const closeModal = () => { $("#modal").style.display = "none"; };
+let modalDragEnd = 0;   // a drag that ends over the backdrop mustn't count as a click that closes the window
+$("#modal").addEventListener("click", e => { if (e.target.id === "modal" && Date.now() - modalDragEnd > 300) closeModal(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+$("#mClose").onclick = closeModal;
+
+// resizable screenshot window: size, divider and maximized state are remembered (localStorage)
+const MODAL_KEY = "dockt-modal", M_MIN_W = 560, M_MIN_H = 320;
+let modalSize = {};
+try { modalSize = JSON.parse(localStorage.getItem(MODAL_KEY) || "{}") || {}; } catch {}
+function applyModalSize() {
+  const box = $("#modal .box"), s = modalSize;
+  const set = (k, v) => v ? box.style.setProperty(k, v) : box.style.removeProperty(k);
+  set("--m-w", s.w && Math.min(s.w, window.innerWidth - 48) + "px");
+  set("--m-h", s.h && Math.min(s.h, window.innerHeight - 96) + "px");
+  set("--m-split", s.split && s.split + "%");
+  box.classList.toggle("sized", !!s.h);
+  box.classList.toggle("max", !!s.max);
+  $("#mMax").title = $("#mMax").ariaLabel = s.max ? "Restore" : "Maximize";
+}
+function saveModalSize() { try { localStorage.setItem(MODAL_KEY, JSON.stringify(modalSize)); } catch {} }
+$("#mMax").onclick = () => { modalSize.max = !modalSize.max; applyModalSize(); saveModalSize(); };
+function dragHandle(el, onMove, onReset) {
+  el.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("on");
+    document.body.classList.add("m-resizing");
+    const start = {x: e.clientX, y: e.clientY, rect: $("#modal .box").getBoundingClientRect()};
+    const move = ev => { onMove(ev, start); applyModalSize(); };
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.classList.remove("on");
+      document.body.classList.remove("m-resizing");
+      modalDragEnd = Date.now();
+      saveModalSize();
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up, {once: true});
+    el.addEventListener("pointercancel", up, {once: true});
+  });
+  el.ondblclick = () => { onReset(); applyModalSize(); saveModalSize(); };
+}
+document.querySelectorAll(".m-rs").forEach(el => dragHandle(el, (ev, s) => {
+  const dir = el.dataset.dir;
+  modalSize.max = false;
+  // the window is centred, so the dragged edge follows the cursor when the width changes by twice the movement
+  if (dir.includes("e")) modalSize.w = Math.round(Math.max(M_MIN_W, Math.min(s.rect.width + 2 * (ev.clientX - s.x), window.innerWidth - 48)));
+  if (dir.includes("s")) modalSize.h = Math.round(Math.max(M_MIN_H, Math.min(s.rect.height + (ev.clientY - s.y), window.innerHeight - 96)));
+}, () => { delete modalSize.w; delete modalSize.h; delete modalSize.max; }));
+dragHandle($(".m-split"), (ev, s) => {
+  modalSize.split = Math.round(Math.max(30, Math.min(80, (ev.clientX - s.rect.left) / s.rect.width * 100)) * 10) / 10;
+}, () => { delete modalSize.split; });
+window.addEventListener("resize", () => { if ($("#modal").style.display === "block") applyModalSize(); });
 
 // ---------- deep links (Lane 1 opens these) ----------
 async function route() {
