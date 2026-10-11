@@ -1,0 +1,4 @@
+# Dashboard regression tests (tests/dashboard). Uses installed Edge/Chrome; otherwise run
+#   python -m playwright install chromium
+pytest>=8
+playwright>=1.45
