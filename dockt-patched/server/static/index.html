@@ -643,7 +643,33 @@ function setMic(state) {   // "idle" | "recording" | "working"
   b.setAttribute("aria-label", on ? "Stop recording" : "Start voice input");
   b.title = on ? "Stop and transcribe (Esc cancels)" : "Voice input";
 }
-async function startMic() {
+let petVoiceState = {id: null, state: "idle", text: "", error: ""};
+function petVoiceCommand(action, id) {
+  if (action === "start") {
+    if (micState !== "idle") return {state: "error", error: "Finish the current recording first."};
+    petVoiceState = {id, state: "starting", text: "", error: ""};
+    startMic(id).then(() => {
+      if (petVoiceState.id !== id || petVoiceState.state === "cancelled") return;
+      if (rec?.petSession === id) {
+        petVoiceState.state = "recording";
+        if (petVoiceState.stopRequested) { petVoiceState.state = "working"; stopMic(); }
+      } else {
+        petVoiceState.state = "error";
+        petVoiceState.error = $("#q").placeholder || "Couldn't start the microphone.";
+      }
+    });
+  } else {
+    if (petVoiceState.id !== id) return {state: "error", error: "This voice session has ended."};
+    if (action === "stop") {
+      petVoiceState.stopRequested = true;
+      if (rec?.petSession === id) { petVoiceState.state = "working"; stopMic(); }
+    } else if (action === "cancel") {
+      cancelMic();
+    }
+  }
+  return {...petVoiceState};
+}
+async function startMic(petSession = null) {
   if (micState !== "idle") return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
     return micHint("Voice input isn't available in this window.", 4000);
@@ -663,7 +689,7 @@ async function startMic() {
     stream.getTracks().forEach(t => t.stop()); setMic("idle");
     return micHint("Couldn't start recording. Try again.", 4000);
   }
-  const r = rec = {recorder, stream, chunks: [], cancelled: false, generation};
+  const r = rec = {recorder, stream, chunks: [], cancelled: false, generation, petSession};
   recorder.ondataavailable = e => { if (e.data && e.data.size) r.chunks.push(e.data); };
   recorder.onstop = () => finishMic(r);
   r.timer = setTimeout(stopMic, MIC_LIMIT_MS);
@@ -679,6 +705,7 @@ async function startMic() {
   micHint("Listening… stops when you're done, or click the mic.");
 }
 function cancelMic() {
+  if (["starting", "recording", "working"].includes(petVoiceState.state)) petVoiceState.state = "cancelled";
   ++micGeneration;
   if (rec) {
     rec.cancelled = true;
@@ -719,7 +746,12 @@ async function finishMic(r) {
   r.stream.getTracks().forEach(t => t.stop());   // turn the mic (and the OS mic indicator) off
   if (rec === r) rec = null;
   if (r.generation !== micGeneration) return;
-  if (r.cancelled || !r.chunks.length) { setMic("idle"); micHint(r.hint || "", r.hint ? 4000 : 0); return; }
+  if (r.cancelled || !r.chunks.length) {
+    if (r.petSession && petVoiceState.id === r.petSession) {
+      petVoiceState.state = "error"; petVoiceState.error = r.hint || "No audio was recorded. Try speaking a little longer.";
+    }
+    setMic("idle"); micHint(r.hint || "", r.hint ? 4000 : 0); return;
+  }
   setMic("working");
   micHint("Transcribing…");
   try {
@@ -729,6 +761,9 @@ async function finishMic(r) {
     form.append("audio", audio, audio.type === "audio/wav" ? "speech.wav" : "speech.webm");
     const said = ((await api("/api/transcribe", {method: "POST", body: form})).text || "").trim();
     if (r.generation !== micGeneration) return;
+    if (r.petSession && petVoiceState.id === r.petSession) {
+      petVoiceState.text = said; petVoiceState.state = "done"; micHint(""); return;
+    }
     if (!said) return micHint("Didn't catch that. Try again.", 4000);
     const q = $("#q");
     q.value = q.value.trim() ? q.value.replace(/\s*$/, " ") + said : said;
@@ -738,6 +773,9 @@ async function finishMic(r) {
     micHint("");
   } catch (e) {
     if (r.generation !== micGeneration) return;
+    if (r.petSession && petVoiceState.id === r.petSession) {
+      petVoiceState.state = "error"; petVoiceState.error = "Couldn't transcribe that. Check local Whisper and try again.";
+    }
     micHint(/not configured/.test(e.message) ? "Voice input isn't set up on this Dockt yet."
                                              : "Couldn't transcribe that. Try again.", 5000);
   } finally { if (r.generation === micGeneration) setMic("idle"); }

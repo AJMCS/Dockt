@@ -38,6 +38,12 @@ already running. The first launch downloads the speech model weights once, so
 allow extra time for setup. Audio transcription and speech playback run locally.
 An explicit `STT_URL` can point to another local speech server instead.
 
+The pet uses the dashboard's WebView microphone recorder through the desktop's
+loopback control endpoint. It shares microphone permissions and WAV conversion
+with dashboard dictation; the resulting transcript goes to quick chat without
+changing the dashboard's typed draft. Keep the desktop app running (it can be
+hidden), and allow microphone access once in its window.
+
 ## The GX10 (models only)
 
 The GX10 runs Ollama with three models kept loaded:

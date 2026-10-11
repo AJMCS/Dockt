@@ -12,9 +12,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import wave
+import time
 import tkinter as tk
 import customtkinter as ctk
 from tkinter import ttk
@@ -393,48 +393,62 @@ class LocalSpeech:
 
 
 class MicRecorder:
-    """Records the default microphone with Windows' built-in MCI audio API, so voice input needs no extra
-    package. Records 16 kHz mono 16-bit WAV, the format Whisper servers expect."""
-    ALIAS = "dockt_mic"
+    """Use the desktop WebView's recorder, the same one as dashboard dictation."""
 
-    def __init__(self, winmm=None):
-        self.winmm = winmm or ctypes.windll.winmm
+    def __init__(self):
+        self.id = str(uuid.uuid4())
+        self.cancelled = threading.Event()
+        self.active = False
 
-    def _send(self, command: str) -> str:
-        buffer = ctypes.create_unicode_buffer(256)
-        error = self.winmm.mciSendStringW(command, buffer, 255, None)
-        if error:
-            message = ctypes.create_unicode_buffer(256)
-            self.winmm.mciGetErrorStringW(error, message, 255)
-            raise OSError(message.value or f"MCI error {error}")
-        return buffer.value
+    def _command(self, action):
+        body = json.dumps({"action": action, "id": self.id}).encode()
+        request = Request(f"http://127.0.0.1:{DESKTOP_CONTROL_PORT}/voice", data=body,
+                          headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(request, timeout=3) as response:
+                result = json.loads(response.read())
+        except HTTPError as exc:
+            raise OSError("Restart Dockt to load the desktop voice recorder.") from exc
+        except (URLError, TimeoutError, OSError, ValueError) as exc:
+            raise OSError("Can't reach the desktop voice recorder. Open Dockt and try again.") from exc
+        if not isinstance(result, dict) or result.get("state") not in (
+                "starting", "recording", "working", "done", "cancelled", "error"):
+            raise OSError("Restart Dockt to load the desktop voice recorder.")
+        if result.get("state") == "error":
+            raise OSError(result.get("error") or "The microphone couldn't record.")
+        return result
 
     def start(self):
-        self.cancel()   # a recording left open by a crash would block the alias
-        self._send(f"open new type waveaudio alias {self.ALIAS}")
+        self.cancelled.clear()
+        self.active = True
         try:
-            self._send(f"set {self.ALIAS} time format ms bitspersample 16 channels 1 samplespersec 16000 "
-                       "bytespersec 32000 alignment 2")
-            self._send(f"record {self.ALIAS}")
+            self._command("start")
         except OSError:
             self.cancel()
             raise
 
-    def stop(self) -> bytes:
-        path = Path(tempfile.gettempdir()) / f"dockt-voice-{uuid.uuid4().hex}.wav"
-        try:
-            self._send(f"stop {self.ALIAS}")
-            self._send(f'save {self.ALIAS} "{path}"')
-            return path.read_bytes()
-        finally:
-            self.cancel()
-            path.unlink(missing_ok=True)
+    def stop(self) -> str:
+        self._command("stop")
+        deadline = time.monotonic() + 120
+        while not self.cancelled.is_set() and time.monotonic() < deadline:
+            result = self._command("status")
+            if result.get("state") == "done":
+                self.active = False
+                return (result.get("text") or "").strip()
+            if result.get("state") == "cancelled":
+                raise OSError("Voice recording was cancelled.")
+            self.cancelled.wait(0.2)
+        self.cancel()
+        raise OSError("Voice transcription timed out. Try again.")
 
     def cancel(self):
-        try:
-            self._send(f"close {self.ALIAS}")
-        except OSError:
-            pass
+        self.cancelled.set()
+        if self.active:
+            try:
+                self._command("cancel")
+            except OSError:
+                pass
+        self.active = False
 
 
 class EndOfSpeech:
@@ -1719,7 +1733,8 @@ class QuickChat:
             recorder = new_recorder()
             recorder.start()
         except (OSError, AttributeError) as exc:
-            self.status.set(f"Couldn't open the microphone ({exc}). Check Windows' microphone privacy settings.")
+            self.show()
+            self.status.set(f"Couldn't start voice input: {exc}")
             self._pet_say("Mic not available", 4000)
             return
         self.recorder, self.voice_state = recorder, "recording"
@@ -1758,32 +1773,28 @@ class QuickChat:
         if self._voice_limit_job is not None:
             self.root.after_cancel(self._voice_limit_job)
             self._voice_limit_job = None
-        recorder, self.recorder = self.recorder, None
-        try:
-            wav = recorder.stop()
-        except OSError as exc:
-            self.voice_state = "idle"
-            self.voice_conversation = False
-            self.status.set(f"Couldn't save the recording ({exc}).")
-            self._pet_say("Mic not available", 4000)
-            return
+        recorder = self.recorder
         self.voice_state = "transcribing"
         self._pet_say("Transcribing…")
         generation = self.voice_generation
 
         def work():
             try:
-                self.events.put(("voice-text", (generation, transcribe_audio(wav))))
-            except VoiceError as exc:
-                self.events.put(("voice-error", (generation, exc)))
+                self.events.put(("voice-text", (generation, recorder.stop())))
+            except OSError as exc:
+                recorder.cancel()
+                self.events.put(("voice-error", (generation, VoiceError("Voice input failed", str(exc)))))
 
         threading.Thread(target=work, name="dockt-voice", daemon=True).start()
 
     def _voice_done(self, text: str):
         """Put the words in the quick chat's box (not sent, so a misheard word can be fixed) and open it."""
         self.voice_state = "idle"
+        self.recorder = None
         if not text:
             self.voice_conversation = False
+            self.show()
+            self.status.set("Didn't catch any speech. Check your microphone and try again.")
             self._pet_say("Didn't catch that", 3000)
             return
         self._pet_say("")
@@ -2195,6 +2206,8 @@ class QuickChat:
                         continue
                     self.voice_state = "idle"
                     self.voice_conversation = False
+                    self.recorder = None
+                    self.show()
                     self.status.set(str(error))
                     self._pet_say(error.short, 4000)
                 elif kind == "speech-done":

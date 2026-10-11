@@ -257,9 +257,8 @@ class QuickChatWidgetTests(unittest.TestCase):
         app.pet.deiconify()
         root.update()
         recorder = Mock()
-        recorder.stop.return_value = b"RIFF-wav"
-        recorder.levels.return_value = []   # hears nothing yet: stopping is up to the clicks
-        with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
+        recorder.stop.return_value = "where is dinner tonight"
+        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
             app._pet_hint(True)
             for action in (app._start_voice, app._stop_voice):
                 action()
@@ -274,7 +273,7 @@ class QuickChatWidgetTests(unittest.TestCase):
                 if app.voice_state == "idle":
                     break
                 time.sleep(0.02)
-        upload.assert_called_once_with(b"RIFF-wav")
+        upload.assert_not_called()
         self.assertEqual(app.voice_state, "idle")
         self.assertEqual(app.chat.state(), "normal", "the quick chat opens with the words in it")
         self.assertEqual(app.entry.get("1.0", "end-1c"), "where is dinner tonight")
@@ -286,7 +285,7 @@ class QuickChatWidgetTests(unittest.TestCase):
         app._clear_composer_placeholder()
         app.entry.insert("1.0", "Keep this unsent draft")
         recorder = Mock()
-        recorder.stop.return_value = b"RIFF-wav"
+        recorder.stop.return_value = "When is dinner?"
         result = {"answer": "Dinner is at seven. [#3]", "sources": [], "cited": [], "ms": 1}
         with patch.object(quickchat, "MicRecorder", return_value=recorder), \
                 patch.object(quickchat, "transcribe_audio", return_value="When is dinner?"), \
@@ -329,10 +328,10 @@ class QuickChatWidgetTests(unittest.TestCase):
         app.hide()
         root.update()
         recorder = Mock()
-        recorder.stop.return_value = b"RIFF-wav"
-        recorder.levels.return_value = []   # hears nothing yet: stopping is up to the clicks
-        error = quickchat.VoiceError("Voice isn't set up", "Voice input isn't set up on this Dockt yet.")
-        with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", side_effect=error):
+        recorder.stop.return_value = "where is dinner tonight"
+        error = OSError("Voice input isn't set up on this Dockt yet.")
+        recorder.stop.side_effect = error
+        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", side_effect=error):
             app._toggle_voice()
             app._toggle_voice()
             for _ in range(50):
@@ -340,9 +339,9 @@ class QuickChatWidgetTests(unittest.TestCase):
                 if app.voice_state == "idle":
                     break
                 time.sleep(0.02)
-        self.assertEqual(app.pet_notice, "Voice isn't set up")
+        self.assertEqual(app.pet_notice, "Voice input failed")
         self.assertEqual(app.status.get(), "Voice input isn't set up on this Dockt yet.")
-        self.assertEqual(app.chat.state(), "withdrawn", "nothing to show in the chat")
+        self.assertEqual(app.chat.state(), "normal", "show the voice error in quick chat")
 
     def _record_with_levels(self, app, root, levels):
         """Start the pet mic on a fake recorder that hears `levels` (one per 100 ms), and run Tk until it's idle."""

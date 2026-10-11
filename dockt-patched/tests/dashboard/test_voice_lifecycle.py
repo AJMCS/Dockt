@@ -1,4 +1,42 @@
 from test_dashboard import MIC_STUB
+import uuid
+
+
+def test_pet_uses_dashboard_audio_pipeline_without_changing_dashboard_draft(dash):
+    dash.page.add_init_script(MIC_STUB)
+    dash.open()
+    dash.page.fill("#q", "Keep my dashboard draft")
+    token = str(uuid.uuid4())
+    dash.page.evaluate("id => petVoiceCommand('start', id)", token)
+    dash.page.wait_for_function("petVoiceState.state === 'recording'")
+    dash.page.evaluate("id => petVoiceCommand('stop', id)", token)
+    dash.page.wait_for_function("petVoiceState.state === 'done'")
+    result = dash.page.evaluate("id => petVoiceCommand('status', id)", token)
+    assert result["text"] == "mock transcript"
+    assert dash.page.input_value("#q") == "Keep my dashboard draft"
+    assert dash.js("messages.length") == 0
+    assert dash.js("__mic.uploads[0].type") == "audio/wav"
+
+
+def test_pet_microphone_permission_error_returns_to_pet(dash):
+    dash.page.add_init_script(MIC_STUB)
+    dash.open()
+    dash.page.evaluate("__mic.deny = true")
+    dash.page.evaluate("id => petVoiceCommand('start', id)", str(uuid.uuid4()))
+    dash.page.wait_for_function("petVoiceState.state === 'error'")
+    assert "Microphone blocked" in dash.js("petVoiceState.error")
+
+
+def test_pet_cancel_discards_transcript(dash):
+    dash.page.add_init_script(MIC_STUB)
+    dash.open()
+    token = str(uuid.uuid4())
+    dash.page.evaluate("id => petVoiceCommand('start', id)", token)
+    dash.page.wait_for_function("petVoiceState.state === 'recording'")
+    dash.page.evaluate("id => petVoiceCommand('cancel', id)", token)
+    dash.page.wait_for_function("micState === 'idle'")
+    assert dash.js("petVoiceState.state") == "cancelled"
+    assert dash.js("__mic.uploads.length") == 0
 
 
 def test_pending_permission_is_single_flight_and_cancel_releases_mic(dash):

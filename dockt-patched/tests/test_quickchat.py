@@ -581,45 +581,25 @@ if __name__ == "__main__":
 
 
 class VoiceInputTests(unittest.TestCase):
-    """The pet's mic button: MCI recording and the upload to /api/transcribe."""
+    """The pet uses the dashboard recorder through the local desktop bridge."""
 
-    class FakeWinmm:
-        """Stands in for ctypes.windll.winmm: logs MCI commands; `save` writes a WAV where asked."""
+    def test_recorder_returns_desktop_transcript(self):
+        recorder = quickchat.MicRecorder()
+        with patch.object(recorder, "_command", side_effect=[
+                {"state": "recording"}, {"state": "working"},
+                {"state": "done", "text": " where is dinner tonight "}]) as command:
+            recorder.start()
+            self.assertEqual(recorder.stop(), "where is dinner tonight")
+            self.assertEqual([call.args[0] for call in command.call_args_list], ["start", "stop", "status"])
+        self.assertFalse(recorder.active)
 
-        def __init__(self, fail_on=None):
-            self.commands, self.fail_on = [], fail_on
-
-        def mciSendStringW(self, command, _buffer, _size, _hwnd):
-            self.commands.append(command)
-            if self.fail_on and command.startswith(self.fail_on):
-                return 328   # an MCI error code
-            if command.startswith("save "):
-                Path(command.split('"')[1]).write_bytes(b"RIFF-fake-wav")
-            if command.startswith("close ") and len(self.commands) == 1:
-                return 263   # nothing open yet: the first, defensive close fails like the real API
-            return 0
-
-        def mciGetErrorStringW(self, _code, buffer, _size):
-            buffer.value = "The device is not ready."
-            return 1
-
-    def test_recorder_records_16k_mono_wav_and_cleans_up(self):
-        winmm = self.FakeWinmm()
-        recorder = quickchat.MicRecorder(winmm)
-        recorder.start()
-        self.assertIn("open new type waveaudio alias dockt_mic", winmm.commands)
-        self.assertTrue(any("bitspersample 16 channels 1 samplespersec 16000" in c for c in winmm.commands))
-        self.assertEqual(winmm.commands[-1], "record dockt_mic")
-        self.assertEqual(recorder.stop(), b"RIFF-fake-wav")
-        saved = Path(next(c for c in winmm.commands if c.startswith("save ")).split('"')[1])
-        self.assertFalse(saved.exists(), "the temp WAV is deleted after reading")
-        self.assertEqual(winmm.commands[-1], "close dockt_mic", "the microphone is released")
-
-    def test_recorder_start_failure_releases_the_device(self):
-        winmm = self.FakeWinmm(fail_on="record")
-        with self.assertRaisesRegex(OSError, "not ready"):
-            quickchat.MicRecorder(winmm).start()
-        self.assertEqual(winmm.commands[-1], "close dockt_mic")
+    def test_recorder_cancel_stops_desktop_microphone(self):
+        recorder = quickchat.MicRecorder()
+        with patch.object(recorder, "_command", return_value={"state": "recording"}) as command:
+            recorder.start()
+            recorder.cancel()
+            self.assertEqual(command.call_args.args[0], "cancel")
+        self.assertTrue(recorder.cancelled.is_set())
 
     def test_transcribe_audio_posts_a_wav_upload(self):
         sent = {}

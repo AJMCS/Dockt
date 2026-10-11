@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -264,6 +265,39 @@ def make_icon():
 # ---------- single instance: a tiny control endpoint on 127.0.0.1 ----------
 class Control(BaseHTTPRequestHandler):
     window = None
+
+    def do_POST(self):
+        if self.path != "/voice" or self.headers.get("Content-Type") != "application/json":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 1024:
+                raise ValueError("invalid request length")
+            request = json.loads(self.rfile.read(length))
+            action, token = request.get("action"), request.get("id")
+            if action not in ("start", "stop", "status", "cancel") or not isinstance(token, str):
+                raise ValueError("invalid voice action")
+            uuid.UUID(token)
+        except (ValueError, TypeError, AttributeError):
+            self.send_error(400)
+            return
+        try:
+            if self.window is None or not window_ready.is_set():
+                raise RuntimeError("dashboard not ready")
+            result = self.window.evaluate_js(f"petVoiceCommand({json.dumps(action)}, {json.dumps(token)})")
+            if not isinstance(result, dict):
+                raise RuntimeError("voice bridge unavailable")
+            status = 200
+        except Exception:
+            status = 503
+            result = {"state": "error", "error": "Restart Dockt to load the desktop voice recorder."}
+        body = json.dumps(result).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
