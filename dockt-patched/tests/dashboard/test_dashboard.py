@@ -34,6 +34,12 @@ def assert_cited_first(dash: Dash, ids: list[str]):
     assert not any(s.endswith("*") for s in shown[len(ids):]), shown
 
 
+def open_pane(dash: Dash, name: str):
+    """Open Promises / Timeline (or Sources on narrow windows) from the top-right buttons."""
+    dash.page.click(f".tab[data-pane={name}]")
+    dash.page.wait_for_selector(f"#pane [data-view={name}]", state="visible")
+
+
 def chips(dash: Dash, scope: str = "#thread .msg.bot") -> list[str]:
     return dash.page.locator(f"{scope} .cite").evaluate_all("els => els.map(e => e.dataset.id)")
 
@@ -52,7 +58,7 @@ def source_ids(dash: Dash) -> list[str]:
 def test_page_loads_clean(dash):
     dash.open()
     assert dash.page.title() == "Dockt"
-    assert dash.page.inner_text("#localBadge") == "● 100% on-device"
+    assert dash.page.inner_text("#localBadge") == "● Powered by local AI"
     assert dash.js("document.activeElement.id") == "q"
     assert dash.page.inner_text("#thread").strip() == ""
     assert "show up here" in dash.page.inner_text("#sources")
@@ -67,6 +73,7 @@ def test_removed_features_stay_removed(dash):
     body = dash.page.inner_text("body")
     assert "Ask about anything that was on your screen" not in body
     assert "pulled from your screens" not in body
+    assert "100% on-device" not in body and "Stays on this laptop" not in body
 
 
 def test_device_picker_lists_devices(dash):
@@ -259,15 +266,18 @@ def test_deep_link_to_missing_capture_does_nothing(dash):
 def test_promises_list(dash, dockt):
     items = dockt.get("/api/commitments?hours=48")["items"]
     dash.open()
-    dash.page.wait_for_function(f"document.querySelectorAll('#promises li[data-id]').length === {len(items)}")
     open_n = sum(1 for c in items if not c["done"])
-    assert f"{open_n} open" in dash.page.inner_text(".todayhead h3")
+    dash.page.wait_for_function(f"document.querySelector('#promCount').textContent === '{open_n}'")
+    open_pane(dash, "promises")
+    dash.page.wait_for_function(f"document.querySelectorAll('#promises li[data-id]').length === {len(items)}")
+    assert f"{open_n} open" in dash.page.inner_text("#pane [data-view=promises] h3")
     dash.page.locator("#promises .cite").first.click()
     dash.page.wait_for_selector("#modal", state="visible")
 
 
 def test_promise_checkbox_saves_and_undoes(dash, dockt):
     dash.open()
+    open_pane(dash, "promises")
     row = dash.page.locator("#promises li[data-id]:not(.done)").first
     pid = int(row.get_attribute("data-id"))
     done = lambda: next(c["done"] for c in dockt.get("/api/commitments?hours=48&include_done=true")["items"] if c["id"] == pid)
@@ -282,6 +292,7 @@ def test_promise_checkbox_saves_and_undoes(dash, dockt):
 def test_promise_checkbox_reverts_when_server_fails(dash):
     dash.page.route("**/api/commitments/*/done", lambda r: r.fulfill(status=500, body="nope"))
     dash.open()
+    open_pane(dash, "promises")
     box = dash.page.locator("#promises li[data-id]:not(.done) input").first
     box.click()
     dash.page.wait_for_timeout(400)
@@ -293,6 +304,7 @@ def test_promise_checkbox_reverts_when_server_fails(dash):
 def test_standup_and_timesheet(dash, kind, label):
     dash.page.route(f"**/api/standup?kind={kind}*", lambda r: (dash.page.wait_for_timeout(500), r.continue_()))
     dash.open()
+    open_pane(dash, "promises")
     dash.page.click(f"button[data-standup={kind}]")
     dash.page.wait_for_function("busy")
     assert dash.page.is_disabled("#go")
@@ -306,6 +318,7 @@ def test_standup_and_timesheet(dash, kind, label):
 def test_standup_failure_is_friendly(dash):
     dash.page.route("**/api/standup*", lambda r: r.fulfill(status=500, body="trace"))
     dash.open()
+    open_pane(dash, "promises")
     dash.page.click("button[data-standup=standup]")
     dash.page.wait_for_function("!busy && document.querySelectorAll('#thread .msg.bot').length === 1")
     assert "Couldn't read today's activity" in dash.last_bot_text()
@@ -313,24 +326,38 @@ def test_standup_failure_is_friendly(dash):
 
 
 # ---------------------------------------------------------------- timeline
-def test_timeline_click_fills_sources_and_new_chat_clears(dash):
+def test_timeline_slot_lists_its_screens_and_new_chat_clears(dash):
     dash.open()
+    open_pane(dash, "timeline")
     dash.page.wait_for_selector("#timeline .bar")
-    assert [t for t in dash.page.locator(".tlaxis span").all_inner_texts() if t], "hour labels missing"
+    assert [x for x in dash.page.locator(".tlaxis span").all_inner_texts() if x], "hour labels missing"
     dash.page.locator("#timeline .bar").first.click()
-    dash.page.wait_for_function("document.querySelector('#sourcesTitle').textContent.includes('–')")
-    assert dash.page.locator("#sources .card").count() > 0
+    dash.page.wait_for_function("document.querySelector('#tlTitle').textContent.includes('–')")
+    assert dash.page.locator("#tlSources .card").count() > 0
     assert dash.page.locator("#timeline .bar.sel").count() == 1
     dash.js("refreshTimeline()")
     dash.page.wait_for_timeout(400)
     assert dash.page.locator("#timeline .bar.sel").count() == 1, "selection lost on refresh"
+    dash.page.locator("#tlSources .card").first.click()
+    dash.page.wait_for_selector("#modal", state="visible")
+    dash.page.keyboard.press("Escape")
     dash.page.click("#newChat")
-    assert dash.page.inner_text("#sourcesTitle").lower() == "sources"
+    assert dash.page.locator("#timeline .bar.sel").count() == 0
+    assert dash.page.locator("#tlTitle").is_hidden()
 
 
 # ---------------------------------------------------------------- recent chats (sidebar)
-def chat_titles(dash):
-    return dash.page.locator("#chatList li[data-id] .ctitle").all_inner_texts()
+def chat_titles(dash, expect: list[str] | None = None):
+    """Titles in Recents. History is saved through the local service, so the list updates a moment
+    after each change: pass `expect` to wait for it (up to 5 s)."""
+    titles = lambda: dash.page.locator("#chatList li[data-id] .ctitle").all_inner_texts()
+    if expect is not None:
+        for _ in range(50):
+            if titles() == expect:
+                break
+            dash.page.wait_for_timeout(100)
+        assert titles() == expect, f"Recents shows {titles()}, expected {expect}"
+    return titles()
 
 
 def test_recent_chats_lifecycle(dash):
@@ -338,11 +365,10 @@ def test_recent_chats_lifecycle(dash):
     assert dash.page.inner_text("#chatList") == "No chats yet."
     dash.ask("where is dinner tonight")
     dash.page.reload()
-    dash.page.wait_for_selector("#chatList li[data-id]")
-    assert chat_titles(dash) == ["where is dinner tonight"]
+    assert chat_titles(dash, ["where is dinner tonight"]) == ["where is dinner tonight"]
     dash.page.click("#newChat")
     dash.ask("find invoice 4471")
-    assert chat_titles(dash) == ["find invoice 4471", "where is dinner tonight"]
+    assert chat_titles(dash, ["find invoice 4471", "where is dinner tonight"])
     assert dash.page.inner_text("#chatList li.on .ctitle") == "find invoice 4471"
     # reopen the older chat: answer, chips and sources come back
     dash.page.locator("#chatList li", has_text="where is dinner").click()
@@ -351,21 +377,23 @@ def test_recent_chats_lifecycle(dash):
     assert_cited_first(dash, ids)
     # continuing it moves it to the top instead of creating a new entry
     dash.ask("who booked it")
-    assert chat_titles(dash) == ["where is dinner tonight", "find invoice 4471"]
+    assert chat_titles(dash, ["where is dinner tonight", "find invoice 4471"])
     assert dash.js("messages.length") == 4
     # delete the other one
     other = dash.page.locator("#chatList li", has_text="invoice")
     other.hover()
     other.locator(".del").click()
-    assert chat_titles(dash) == ["where is dinner tonight"]
+    assert chat_titles(dash, ["where is dinner tonight"])
 
 
-def test_saved_chats_are_small_and_local(dash):
+def test_chats_saved_in_local_store_shared_with_pet(dash, dockt):
+    """History lives in the local service (shared with Lane 1's quick-chat pet), not in browser storage."""
     dash.open().ask("where is dinner tonight")
-    raw = dash.js("localStorage.getItem('dockt-chats')")
-    saved = json.loads(raw)
-    assert len(saved) == 1 and saved[0]["messages"][1]["sources"]
-    assert '"ocr"' not in raw, "screen text should not be stored in chat history"
+    dash.page.wait_for_function("document.querySelectorAll('#chatList li[data-id]').length === 1")
+    saved = dockt.get("/api/conversations")
+    assert [c["title"] for c in saved] == ["where is dinner tonight"]
+    assert [m["role"] for m in saved[0]["messages"]] == ["user", "assistant"]
+    assert dash.js("localStorage.getItem('dockt-chats')") is None
 
 
 def test_saved_chats_open_when_gx10_is_down(dash):
@@ -386,11 +414,11 @@ def test_saved_chats_open_when_gx10_is_down(dash):
 # ---------------------------------------------------------------- on-device badge
 def test_badge_reflects_gx10_health(dash):
     dash.open()
-    assert dash.page.inner_text("#localBadge") == "● 100% on-device"
+    assert dash.page.inner_text("#localBadge") == "● Powered by local AI"
     dash.page.route("**/api/health", lambda r: r.fulfill(
         status=200, content_type="application/json", body='{"models":{"vlm":true,"embed":false,"llm":true}}'))
     dash.js("refreshHealth()")
-    dash.page.wait_for_function("document.querySelector('#localBadge').textContent.includes('GX10 unreachable')")
+    dash.page.wait_for_function("document.querySelector('#localBadge').textContent.includes('Local AI unreachable')")
     assert "embed" in dash.page.get_attribute("#localBadge", "title")
     assert dash.js("localBadge.classList.contains('down')")
     dash.page.unroute("**/api/health")
@@ -435,9 +463,12 @@ CONTRAST_JS = """(sels) => {
     out[s] = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
   }
   return out; }"""
-TEXT = ["#thread .msg.bot .text", "#thread .msg.bot .meta", "#thread .msg.user .text", "#thread .cite", "#localBadge",
-        ".kind.deadline", ".ptext", "#promises li > .meta", ".tlaxis span", "#sources .card .sum", "#sources .card .meta",
-        "#chatList .ctitle", ".sb-foot span", "#dev"]
+TEXT = {
+    "sources": ["#thread .msg.bot .text", "#thread .msg.bot .meta", "#thread .msg.user .text", "#thread .cite", "#localBadge",
+                "#sources .card .sum", "#sources .card .meta", "#chatList .ctitle", "#dev", ".tab"],
+    "promises": [".kind.deadline", ".ptext", "#promises li > .meta", "#promCount", "#promHint"],
+    "timeline": [".tlaxis span"],
+}
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
@@ -445,7 +476,12 @@ def test_text_contrast_meets_aa(dash, theme):
     dash.open()
     dash.js(f"document.documentElement.dataset.theme = '{theme}'")
     dash.ask("where is dinner tonight")
-    ratios = dash.page.evaluate(CONTRAST_JS, TEXT)
+    ratios = {}
+    for pane, sels in TEXT.items():
+        if pane != "sources":
+            open_pane(dash, pane)
+            dash.page.wait_for_timeout(300)
+        ratios.update(dash.page.evaluate(CONTRAST_JS, sels))
     missing = [s for s, r in ratios.items() if r is None]
     low = {s: round(r, 2) for s, r in ratios.items() if r is not None and r < 4.5}
     assert not missing, f"elements not found: {missing}"
@@ -466,11 +502,49 @@ def test_no_horizontal_overflow(browser, dockt, width, height):
         ctx.close()
 
 
-def test_first_screen_shows_promises_at_1366x768(dash):
+def test_composer_pinned_to_bottom(dash):
+    """The chat box sits at the bottom of the window; the conversation scrolls above it, the page never does."""
+    dash.open()
+    gap = lambda: 768 - (lambda b: b["y"] + b["height"])(dash.page.locator(".searchrow").bounding_box())
+    assert 0 <= gap() < 40, f"composer not at the bottom when empty ({gap():.0f}px gap)"
+    for q in ["where is dinner tonight", "who booked it", "find invoice 4471", "what did I do this afternoon"]:
+        dash.ask(q)
+    assert 0 <= gap() < 40, f"composer moved after a long chat ({gap():.0f}px gap)"
+    assert dash.js("document.querySelector('#thread').scrollHeight > document.querySelector('#thread').clientHeight")
+    assert not dash.js("document.documentElement.scrollHeight > innerHeight"), "the page itself should not scroll"
+
+
+def test_panels_open_from_top_right_like_artifacts(dash):
     dash.open().ask("where is dinner tonight")
-    dash.js("scrollTo(0, 0)")
-    top = dash.page.locator(".todayhead").bounding_box()["y"]
-    assert top < 768, f"'Things you promised' starts below the fold ({top:.0f}px)"
+    pane_w = lambda: dash.page.locator("#pane").bounding_box()["width"]
+    visible = lambda v: dash.page.locator(f"#pane [data-view={v}]").is_visible()
+    assert visible("sources") and not dash.page.locator(".tab[data-pane=sources]").is_visible()
+    narrow_w = pane_w()
+    open_pane(dash, "promises")
+    assert not visible("sources") and dash.page.locator(".tab[data-pane=promises]").get_attribute("class").count("on")
+    dash.page.wait_for_timeout(300)
+    assert pane_w() > narrow_w, "an open panel should widen like an artifact"
+    dash.page.click(".tab[data-pane=promises]")               # second click closes it
+    assert visible("sources")
+    open_pane(dash, "timeline")
+    dash.page.click("#pane [data-view=timeline] .pane-close")  # so does the x
+    assert visible("sources")
+    assert dash.page.locator(".tab.on").count() == 0
+
+
+@pytest.mark.viewport(400, 820)
+def test_phone_panels_overlay_and_close(dash):
+    dash.open().ask("where is dinner tonight")
+    assert not dash.js("paneVisible()"), "panel should start closed on a phone"
+    open_pane(dash, "sources")
+    assert dash.page.locator("#sources .card").count() > 0
+    dash.page.click("#pane [data-view=sources] .pane-close")
+    dash.page.wait_for_timeout(300)
+    assert not dash.js("paneVisible()")
+    open_pane(dash, "promises")
+    dash.page.locator("#pane button[data-standup=standup]").click()
+    dash.page.wait_for_selector("#thread .msg.bot.draft .copy")
+    assert not dash.js("paneVisible()"), "standup answers in the chat, so the panel gets out of the way"
 
 
 @pytest.mark.viewport(400, 820)
@@ -487,3 +561,39 @@ def test_phone_sidebar_drawer(dash):
     dash.page.click("#menuBtn")
     dash.page.locator("#chatList li[data-id]").first.click()
     assert not dash.js("document.body.classList.contains('sb-open')")
+
+
+# ---------------------------------------------------------------- collapsible sidebar
+def test_sidebar_collapses_to_rail_and_remembers(dash):
+    dash.open().ask("where is dinner tonight")
+    width = lambda: dash.page.locator("#sidebar").bounding_box()["width"]
+    assert width() > 200 and dash.page.locator("#chatList").is_visible()
+    dash.page.click("#sbToggle")
+    dash.page.wait_for_timeout(300)
+    assert width() < 80, "collapsed sidebar should be a slim rail"
+    assert dash.page.locator("#chatList").is_hidden() and dash.page.locator(".sb-new .label").is_hidden()
+    assert dash.page.get_attribute("#sbToggle", "aria-expanded") == "false"
+    dash.page.reload()
+    dash.page.wait_for_timeout(300)
+    assert width() < 80, "collapsed state should survive a reload"
+    dash.page.click("#newChat")                                  # icon-only New chat still works
+    assert dash.js("messages.length") == 0
+    dash.page.route("**/api/health", lambda r: r.fulfill(
+        status=200, content_type="application/json", body='{"models":{"vlm":false,"embed":true,"llm":true}}'))
+    dash.js("refreshHealth()")
+    dash.page.wait_for_function("document.querySelector('#localBadge').classList.contains('down')")
+    assert "rgb(" in dash.js("getComputedStyle(localBadge).backgroundColor"), "status dot shows health when collapsed"
+    dash.page.click("#sbToggle")
+    dash.page.wait_for_timeout(300)
+    assert width() > 200 and dash.page.locator("#chatList").is_visible()
+
+
+@pytest.mark.viewport(400, 820)
+def test_phone_sidebar_toggle_closes_drawer(dash):
+    dash.open()
+    dash.page.click("#menuBtn")
+    dash.page.wait_for_timeout(300)
+    dash.page.click("#sbToggle")
+    dash.page.wait_for_timeout(300)
+    assert dash.page.locator("#sidebar").bounding_box()["x"] < 0
+    assert not dash.js("document.documentElement.classList.contains('sb-collapsed')"), "phones never collapse to a rail"

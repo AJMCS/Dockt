@@ -100,12 +100,12 @@ idle screen sends nothing. "New" is relative to how busy the screen normally is.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-There are 89 tests: the dashboard in a real browser (Edge on Windows, Chrome elsewhere), the desktop helpers, the local API and the quick-chat. The 25 quick-chat tests need tkinter, which Windows Python includes. The suite starts its own mock stack on free ports with a temporary `DATA_DIR`, so it never touches your index or a running Dockt. Run it before pushing; details are in [`tests/dashboard/README.md`](tests/dashboard/README.md).
+It covers the dashboard in a real browser (Edge on Windows, Chrome elsewhere), the desktop helpers, the local API and the quick-chat. The quick-chat tests need tkinter: Windows Python includes it, and on macOS with Homebrew Python run `brew install python-tk@3.11`. The suite starts its own mock stack on free ports with a temporary `DATA_DIR`, so it never touches your index or a running Dockt. Run it before pushing; details are in [`tests/dashboard/README.md`](tests/dashboard/README.md).
 
 ## Demo checklist
 
 - **Network:** your own router. Its internet uplink (WAN) is visibly unplugged; the laptop↔GX10 link stays up. Everything keeps working.
-- **Before judges arrive:** the GX10 shows the three loaded models (`ollama ps`). The demo laptop has captured for at least 1 hour, the planted moments are in "Things you promised", and the badge reads "● 100% on-device".
+- **Before judges arrive:** the GX10 shows the three loaded models (`ollama ps`). The demo laptop has captured for at least 1 hour, the planted moments are in "Things you promised", and the badge reads "● Powered by local AI".
 - **Planted moments + rehearsed questions** (each correct 3× in a row):
   1. "Where is dinner tonight and who booked it?"
   2. "What's the invoice number and when is it due?"

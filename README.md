@@ -16,7 +16,7 @@ Built in one weekend for the **ASUS Local AI track of the UCSC AI Hackathon** (O
 - **Answers with proof.** Ask "Where is dinner tonight and who booked it?" The answer streams in, and every claim cites the screenshot it came from as a chip like `#9`. Click the chip to see the exact pixels, the model's summary and the text on screen. If it isn't on your screens, it says so instead of guessing.
 - **Keeps track of what you promised.** While you work, Dockt pulls promises, deadlines and requests from your screen ("I'll send the revised NDA by Monday") into a checklist, each linked to its screenshot.
 - **Acts on it.** Draft a follow-up email or message from any answer or screenshot. Write your standup, or draft a timesheet from what you actually did today.
-- **Feels like an app, not a website.** A desktop window with chat history in a Claude-style sidebar, light and dark themes, and a quick-chat pet on your desktop (`Ctrl+Space` from anywhere).
+- **Feels like an app, not a website.** A desktop window with chat history in a Claude-style sidebar, Promises and Timeline panels that open from the top right, light and dark themes, and a quick-chat pet on your desktop (`Ctrl+Space` from anywhere).
 
 ## How it works
 
@@ -44,7 +44,7 @@ Built in one weekend for the **ASUS Local AI track of the UCSC AI Hackathon** (O
 
 **Privacy, by design:**
 - The local service only listens on `127.0.0.1`.
-- Screenshots and the index never leave the laptop. The GX10 sees an image only while describing it.
+- Screenshots and the index are stored only on the laptop. Each screenshot goes to the GX10 just long enough to be read, and the GX10 stores nothing.
 - The dashboard loads no fonts, scripts or icons from the internet. A regression test fails if it makes any request off the laptop.
 - To prove it in the demo, we unplug the router's internet uplink and everything keeps working.
 
@@ -82,7 +82,7 @@ cd dockt-patched
 .venv/bin/python -m pytest tests -q
 ```
 
-The suite has 89 tests. It starts its own mock models and Dockt service on free ports with a throwaway data folder, then drives the dashboard in a real browser. It covers:
+The suite starts its own mock models and Dockt service on free ports with a throwaway data folder, then drives the dashboard in a real browser. It covers:
 - streaming answers and citation rules
 - failure paths
 - drafts and the screenshot modal
@@ -90,7 +90,7 @@ The suite has 89 tests. It starts its own mock models and Dockt service on free 
 - promises, standup and timesheet
 - the timeline
 - chat history, including with the GX10 down
-- the on-device badge
+- the local-AI badge
 - both themes, including contrast checks
 - layout from phone to projector size
 - the desktop app and the local API
