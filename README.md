@@ -82,7 +82,7 @@ cd dockt-patched
 .venv/bin/python -m pytest tests -q
 ```
 
-The suite has 84 tests. It starts its own mock models and Dockt service on free ports with a throwaway data folder, then drives the dashboard in a real browser. It covers:
+The suite has 89 tests. It starts its own mock models and Dockt service on free ports with a throwaway data folder, then drives the dashboard in a real browser. It covers:
 - streaming answers and citation rules
 - failure paths
 - drafts and the screenshot modal
