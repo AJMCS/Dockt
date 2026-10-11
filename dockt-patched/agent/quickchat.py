@@ -295,6 +295,50 @@ class VoiceError(Exception):
         self.short = short
 
 
+def _pet_control_image(kind, active=False, state="idle", scale=1.0):
+    """Original dark pill and thin line icons, antialiased at the actual screen DPI."""
+    from PIL import ImageDraw
+    width, height = (108, 28) if kind == "bar" else (24, 22)
+    size = (round(width * scale), round(height * scale))
+    factor = 4 * scale
+    image = Image.new("RGBA", (round(width * factor), round(height * factor)))
+    draw = ImageDraw.Draw(image)
+    def box(coords):
+        return tuple(round(c * factor) for c in coords)
+    def line(coords, fill="#F1F3EE", width=1.5):
+        draw.line(box(coords), fill=fill, width=max(1, round(width * factor)))
+    fill = "#555A53" if active else "#252824"
+    if kind == "mic" and state != "idle":
+        fill = "#EF4444" if active else "#DC2626"
+    draw.rounded_rectangle(box((0, 0, width - .5, height - .5)),
+                           radius=round((12 if kind == "bar" else 6) * factor),
+                           fill=fill, outline="#454A43" if kind == "bar" else fill,
+                           width=max(1, round(factor)))
+    if kind == "chat":
+        draw.rounded_rectangle(box((7, 6, 17, 14)), radius=round(factor),
+                               outline="#F1F3EE", width=round(1.5 * factor))
+        line((10, 14, 9, 17, 13, 14))
+    elif kind == "menu":
+        for y in (7, 11, 15):
+            draw.ellipse(box((10.5, y - 1.5, 13.5, y + 1.5)), fill="#F1F3EE")
+    elif kind == "mic":
+        if state != "idle":
+            draw.rounded_rectangle(box((8, 7, 16, 15)), radius=round(factor), fill="#FFFFFF")
+        else:
+            draw.rounded_rectangle(box((9, 4, 15, 13)), radius=round(3 * factor),
+                                   outline="#F1F3EE", width=round(1.5 * factor))
+            draw.arc(box((6, 5, 18, 17)), start=0, end=180,
+                     fill="#F1F3EE", width=round(1.5 * factor))
+            line((12, 17, 12, 20))
+    image = image.resize(size, Image.Resampling.LANCZOS)
+    # Windows' keyed transparency has no partial alpha; keep the outer edge dark.
+    alpha = image.getchannel("A")
+    solid = Image.new("RGBA", size, fill)
+    solid.alpha_composite(image)
+    solid.putalpha(alpha.point(lambda a: 255 if a >= 128 else 0))
+    return solid
+
+
 class LocalSpeech:
     """Windows SAPI in a hidden child process; text is input data, never shell code."""
     COMMAND = "$ErrorActionPreference='Stop'; [Console]::InputEncoding=[Text.Encoding]::UTF8; $text=[Console]::In.ReadToEnd(); $voice=New-Object -ComObject SAPI.SpVoice; $null=$voice.Speak($text)"
@@ -1495,80 +1539,51 @@ class QuickChat:
             return False
 
     def _draw_pet_controls(self, canvas):
-        self._rounded_rect(canvas, 27, 110, 133, 138, 12, fill="#252824",
-                           outline="#454A43", width=1, tags=("pet-control-bar",))
+        # Render at four times the target resolution, then downsample: Tk canvas
+        # strokes are jagged, especially when Windows scales the desktop.
         voice = getattr(self, "voice_state", "idle")
-        for name, center in (("chat", 48), ("mic", 80), ("talk", 112)):
+        photos = self.__dict__.setdefault("_control_photos", {})
+        def photo(kind, active=False):
+            key = (kind, active, voice if kind == "mic" else "idle", self.ui_scale)
+            if key not in photos:
+                photos[key] = ImageTk.PhotoImage(
+                    _pet_control_image(*key), master=self.pet)
+            return photos[key]
+        canvas.create_image(26, 110, anchor="nw", image=photo("bar"), tags=("pet-control-bar",))
+        for name, center in (("chat", 48), ("menu", 80), ("mic", 112)):
             active = self.pet_hover_button == name
-            fill = "#555A53" if active else "#252824"
-            if ((name == "mic" and not self.voice_conversation) or
-                    (name == "talk" and self.voice_conversation)) and voice != "idle":
-                fill = "#EF4444" if active else "#DC2626"
-            outline = fill
-            self._rounded_rect(
-                canvas, center - 12, 113, center + 12, 135, 6,
-                fill=fill, outline=outline, width=1.2,
-                tags=("pet-control", f"pet-control-{name}"))
-            if name == "chat":
-                canvas.create_rectangle(center - 5, 119, center + 5, 127,
-                                        outline="#F1F3EE", width=1.5,
-                                        tags=("pet-control", f"pet-control-{name}"))
-                canvas.create_line(center - 2, 127, center - 3, 130, center + 1, 127,
-                                   fill="#F1F3EE", width=1.5,
-                                   tags=("pet-control", f"pet-control-{name}"))
-            elif name == "talk":
-                tags = ("pet-control", "pet-control-talk")
-                if self.voice_conversation:
-                    canvas.create_rectangle(center - 4, 120, center + 4, 128,
-                                            fill="#FFFFFF", outline="", tags=tags)
-                else:
-                    canvas.create_arc(center - 7, 117, center + 7, 132, start=0, extent=180,
-                                      style="arc", outline="#F1F3EE", width=1.5, tags=tags)
-                    for offset in (-6, 6):
-                        canvas.create_line(center + offset, 124, center + offset, 130,
-                                           fill="#F1F3EE", width=3, tags=tags)
-            elif voice == "recording" and not self.voice_conversation:   # stop square
-                canvas.create_rectangle(center - 4, 120, center + 4, 128, fill="#FFFFFF", outline="",
-                                        tags=("pet-control", f"pet-control-{name}"))
-            else:                        # microphone, dimmed while transcribing
-                ink = "#8A8F87" if voice == "transcribing" else "#F1F3EE"
-                tags = ("pet-control", f"pet-control-{name}")
-                self._rounded_rect(canvas, center - 3, 117, center + 3, 126, 3, fill="", outline=ink,
-                                   width=1.5, tags=tags)
-                canvas.create_arc(center - 6, 118, center + 6, 130, start=180, extent=180, style="arc",
-                                  outline=ink, width=1.5, tags=tags)
-                canvas.create_line(center, 130, center, 133, fill=ink, width=1.5, tags=tags)
-
+            canvas.create_image(center - 12, 113, anchor="nw", image=photo(name, active),
+                                tags=("pet-control", f"pet-control-{name}"))
             notice = getattr(self, "pet_notice", "")
-            notice_button = "talk" if self.voice_conversation else "mic"
-            if active or (name == notice_button and notice and not self.pet_hover_button):
+            if active or (name == "mic" and notice and not self.pet_hover_button):
                 if name == "chat":
                     title = "Open quick chat"
-                elif name == "talk":
-                    title = ("Stop and ask" if voice == "recording" else "Stop voice chat") if self.voice_conversation else "Voice conversation"
-                    if notice and not active:
-                        title = notice
-                elif active and voice in ("idle", "recording"):   # hovering says what a click does
-                    title = "Stop and transcribe" if voice == "recording" else "Ask by voice"
+                elif name == "menu":
+                    title = "More options"
+                elif voice == "recording":
+                    title = "Stop and ask"
+                elif self.voice_conversation:
+                    title = "Stop voice chat"
                 else:
-                    title = notice or "Transcribing…"
+                    title = "Ask by voice"
+                if notice and not active:
+                    title = notice
                 tooltip_width = min(148, 14 + 4.9 * len(title))
                 left = max(6, min(154 - tooltip_width, center - tooltip_width / 2))
                 self._rounded_rect(canvas, left, 89, left + tooltip_width, 106, 8,
                                    fill="#252824", outline="#454A43", width=1,
                                    tags=("pet-tooltip",))
                 canvas.create_text(left + tooltip_width / 2, 97.5, text=title,
-                                   fill="#F1F3EE", font=("Segoe UI", 8),
-                                   tags=("pet-tooltip",))
+                                   fill="#F1F3EE", font=("Segoe UI", 8), tags=("pet-tooltip",))
 
     def _pet_button_at(self, x, y):
         x, y = x / self.ui_scale, y / self.ui_scale
         if 36 <= x <= 60 and 112 <= y <= 136:
             return "chat"
         if 68 <= x <= 92 and 112 <= y <= 136:
-            return "mic"
+            return "menu"
         if 100 <= x <= 124 and 112 <= y <= 136:
-            return "talk"
+            return "mic"
         return None
 
     def _pet_motion(self, event):
@@ -1642,9 +1657,9 @@ class QuickChat:
         button = self._pet_button_at(_event.x, _event.y)
         if button == "chat":
             self.show()
+        elif button == "menu":
+            self._show_options_at(_event.x_root, _event.y_root)
         elif button == "mic":
-            self._toggle_voice()   # the options menu is on right-click
-        elif button == "talk":
             self._toggle_conversation()
 
     def _pet_say(self, text: str, ms: int | None = None):

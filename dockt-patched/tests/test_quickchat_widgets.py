@@ -148,11 +148,11 @@ class QuickChatWidgetTests(unittest.TestCase):
         root.update()
         self.assertEqual(len(app.pet_canvas.find_withtag("pet-control-bar")), 1)
         chat_control = app.pet_canvas.find_withtag("pet-control-chat")[0]
-        self.assertEqual(app.pet_canvas.type(chat_control), "polygon")
+        self.assertEqual(app.pet_canvas.type(chat_control), "image")
         control_bounds = app.pet_canvas.bbox("pet-control-bar")
         self.assertGreater(control_bounds[1], 100)
         self.assertLessEqual(control_bounds[3], 140)
-        self.assertTrue(app.pet_canvas.find_withtag("pet-control-talk"))
+        self.assertTrue(app.pet_canvas.find_withtag("pet-control-mic"))
 
         app._schedule_pet_hint_hide()
         pending_hide = app._hint_hide_job
@@ -175,8 +175,9 @@ class QuickChatWidgetTests(unittest.TestCase):
             app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=124)
             app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=124)
             root.update()
-            voice.assert_called_once_with()
-            show_options.assert_not_called()
+            voice.assert_not_called()
+            show_options.assert_called_once()
+            show_options.reset_mock()
             with patch.object(app, "_toggle_conversation") as talk:
                 app.pet_canvas.event_generate("<ButtonPress-1>", x=112, y=124)
                 app.pet_canvas.event_generate("<ButtonRelease-1>", x=112, y=124)
@@ -260,9 +261,8 @@ class QuickChatWidgetTests(unittest.TestCase):
         recorder.levels.return_value = []   # hears nothing yet: stopping is up to the clicks
         with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
             app._pet_hint(True)
-            for _ in range(2):   # click the mic to start, click again to stop
-                app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=124)
-                app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=124)
+            for action in (app._start_voice, app._stop_voice):
+                action()
                 root.update()
                 if app.voice_state == "recording":
                     recorder.start.assert_called_once_with()

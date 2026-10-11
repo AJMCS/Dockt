@@ -24,15 +24,13 @@ node --test tests/test_dashboard_history.cjs
 
 ## Voice input and spoken replies (Windows)
 
-Hover over the desktop pet to see three buttons: quick chat, mic dictation, and
-voice conversation (headphones). For dictation, click the mic, speak, then click
-again; the words appear in the chat box for editing before you send them.
-
-For a spoken reply, click the headphones, speak your question, then click again
-to stop and ask. Dockt continues the current quick-chat conversation and reads
-the answer using Windows' built-in local voice. Click the headphones while it is
-thinking or speaking to cancel voice mode, or press Esc in the quick-chat window.
-The answer remains available as text with its source links.
+Hover over the desktop pet to see three buttons: quick chat, more options (three
+dots), and a single microphone for voice. Click the mic, speak your question,
+then click again to stop and ask. Dockt continues the current quick-chat
+conversation and reads the answer using Windows' built-in local voice. Click
+again while it is thinking or speaking to cancel, or press Esc in quick chat.
+The answer remains available as text with its source links. Any unsent typed
+draft is preserved.
 
 The dashboard's mic also provides editable dictation. Whisper runs on this
 laptop's CPU by default; the launcher starts it even when the Dockt service is
