@@ -142,9 +142,9 @@
        padding: 2px 0; max-height: 160px; }
   #q::placeholder { color: var(--muted); }
   .composer-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-  #dev { background: transparent; border: 0; color: var(--muted); font-size: 13px; padding: 6px 8px; border-radius: 8px; cursor: pointer; max-width: 50%; transition: background .15s; }
-  #dev:hover { background: var(--hover); }
-  #dev option { background: var(--surface); color: var(--text); }
+  #dev, #micInput { background: transparent; border: 0; color: var(--muted); font-size: 13px; padding: 6px 8px; border-radius: 8px; cursor: pointer; max-width: 50%; transition: background .15s; }
+  #dev:hover, #micInput:hover { background: var(--hover); }
+  #dev option, #micInput option { background: var(--surface); color: var(--text); }
   .go { margin-left: auto; width: 36px; height: 36px; border-radius: 50%; border: 0; padding: 0; display: grid; place-items: center;
         background: var(--accent); color: var(--on-accent); cursor: pointer; transition: background .15s; }
   .go:hover { background: var(--accent-hover); }
@@ -154,6 +154,10 @@
   .mic { margin-left: auto; width: 36px; height: 36px; border-radius: 50%; border: 0; padding: 0; display: grid; place-items: center;
          background: transparent; color: var(--muted); cursor: pointer; transition: background .15s, color .15s; }
   .mic + .go { margin-left: 0; }
+  #micInput { max-width: 160px; min-width: 0; }
+  #micStatus { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  #micStatus:empty { display: none; }
+  @media (max-width: 500px) { #micInput { max-width: 110px; } }
   .mic:hover { background: var(--hover); color: var(--text); }
   .mic:disabled { opacity: .4; cursor: wait; }
   .mic svg { width: 18px; height: 18px; }
@@ -389,6 +393,7 @@
       <textarea id="q" rows="1" placeholder="Ask anything you saw: where's dinner tonight? find invoice 4471…" autofocus></textarea>
       <div class="composer-bar">
         <select id="dev" aria-label="Device"><option value="">All devices</option></select>
+        <select id="micInput" aria-label="Microphone input" title="Microphone used by dashboard and pet"><option value="">System default mic</option></select>
         <button class="mic" id="mic" type="button" title="Voice input" aria-label="Start voice input" aria-pressed="false">
           <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
           <svg class="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg>
@@ -397,6 +402,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
         </button>
       </div>
+      <div id="micStatus" role="status" aria-live="polite"></div>
     </div>
   </section>
   <aside id="pane">
@@ -629,13 +635,33 @@ function watchSpeech(stream, onVerdict) {
   return stop;
 }
 let micState = "idle", micGeneration = 0;
+let micDevices = [], micInfo = {input: "System default mic", peak: 0};
+try { $("#micInput").dataset.saved = localStorage.getItem("dockt-microphone") || ""; } catch {}
+async function refreshMicInputs() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const selected = $("#micInput").value || $("#micInput").dataset.saved || "";
+    micDevices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput" && d.deviceId);
+    $("#micInput").replaceChildren(new Option("System default mic", ""));
+    micDevices.forEach((d, i) => $("#micInput").add(new Option(d.label || `Microphone ${i + 1}`, d.deviceId)));
+    if (micDevices.some(d => d.deviceId === selected)) $("#micInput").value = selected;
+  } catch {}
+}
+$("#micInput").onchange = () => {
+  $("#micInput").dataset.saved = $("#micInput").value;
+  try { localStorage.setItem("dockt-microphone", $("#micInput").value); } catch {}
+};
+navigator.mediaDevices?.addEventListener?.("devicechange", refreshMicInputs);
+refreshMicInputs();
 function micHint(text, ms) {   // the placeholder doubles as the status line; it shows while the box is empty
   clearTimeout(micHint.timer);
   $("#q").placeholder = text || PLACEHOLDER;
-  if (text && ms) micHint.timer = setTimeout(() => { $("#q").placeholder = PLACEHOLDER; }, ms);
+  $("#micStatus").textContent = text || "";
+  if (text && ms) micHint.timer = setTimeout(() => micHint(""), ms);
 }
 function setMic(state) {   // "idle" | "recording" | "working"
   micState = state;
+  $("#micInput").disabled = state !== "idle";
   const b = $("#mic"), on = state === "recording";
   b.classList.toggle("recording", on);
   b.disabled = state === "working" || state === "starting";
@@ -645,6 +671,7 @@ function setMic(state) {   // "idle" | "recording" | "working"
 }
 let petVoiceState = {id: null, state: "idle", text: "", error: ""};
 function petVoiceCommand(action, id) {
+  if (action === "devices") { refreshMicInputs(); return {state: "done", devices: micDevices.map(d => ({id: d.deviceId, label: d.label})), selected: $("#micInput").value, ...micInfo}; }
   if (action === "start") {
     if (micState !== "idle") return {state: "error", error: "Finish the current recording first."};
     petVoiceState = {id, state: "starting", text: "", error: ""};
@@ -667,7 +694,7 @@ function petVoiceCommand(action, id) {
       cancelMic();
     }
   }
-  return {...petVoiceState};
+  return {...petVoiceState, ...micInfo};
 }
 async function startMic(petSession = null) {
   if (micState !== "idle") return;
@@ -676,11 +703,14 @@ async function startMic(petSession = null) {
   const generation = ++micGeneration;
   setMic("starting");
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
-  catch {
+  const selectedInput = $("#micInput").value;
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: selectedInput ? {deviceId: {exact: selectedInput}} : true}); }
+  catch (error) {
     if (generation !== micGeneration) return;
     setMic("idle");
-    return micHint("Microphone blocked. Allow mic access for Dockt, then try again.", 5000);
+    return micHint(error.name === "OverconstrainedError" || error.name === "NotFoundError"
+      ? "Selected microphone unavailable. Choose another input."
+      : "Microphone blocked. Allow mic access for Dockt, then try again.", 5000);
   }
   if (generation !== micGeneration) { stream.getTracks().forEach(t => t.stop()); return; }
   let recorder;
@@ -690,6 +720,25 @@ async function startMic(petSession = null) {
     return micHint("Couldn't start recording. Try again.", 4000);
   }
   const r = rec = {recorder, stream, chunks: [], cancelled: false, generation, petSession};
+  const track = stream.getAudioTracks?.()[0] || stream.getTracks()[0];
+  micInfo = {input: track.label || "System default mic", peak: 0, muted: !!track.muted};
+  refreshMicInputs();
+  // Read the signal level locally so a silent/wrong input is visible immediately.
+  try {
+    r.levelContext = new AudioContext();
+    r.levelContext.resume().catch(() => {});
+    const source = r.levelContext.createMediaStreamSource(stream), analyser = r.levelContext.createAnalyser();
+    source.connect(analyser); analyser.fftSize = 512;
+    const samples = new Float32Array(analyser.fftSize);
+    r.levelTimer = setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+      micInfo.peak = Math.max(micInfo.peak, peak);
+      micInfo.muted = !!track.muted;
+      const label = `Listening on ${micInfo.input} · ${micInfo.muted ? "Microphone muted" : micInfo.peak > .001 ? "Audio detected" : "No input yet"}`;
+      if ($("#micStatus").textContent !== label) $("#micStatus").textContent = label;
+    }, 250);
+  } catch { if (r.levelContext) r.levelContext.close(); r.levelContext = null; }
   recorder.ondataavailable = e => { if (e.data && e.data.size) r.chunks.push(e.data); };
   recorder.onstop = () => finishMic(r);
   r.timer = setTimeout(stopMic, MIC_LIMIT_MS);
@@ -704,12 +753,18 @@ async function startMic(petSession = null) {
   setMic("recording");
   micHint("Listening… stops when you're done, or click the mic.");
 }
+function stopMicLevel(recording) {
+  clearInterval(recording.levelTimer);
+  recording.levelContext?.close().catch(() => {});
+  recording.levelContext = null;
+}
 function cancelMic() {
   if (["starting", "recording", "working"].includes(petVoiceState.state)) petVoiceState.state = "cancelled";
   ++micGeneration;
   if (rec) {
     rec.cancelled = true;
     clearTimeout(rec.timer);
+    stopMicLevel(rec);
     rec.stream.getTracks().forEach(t => t.stop());
     if (rec.recorder.state !== "inactive") rec.recorder.stop();
     rec = null;
@@ -743,6 +798,7 @@ async function toWav16k(blob) {
   } finally { ctx.close(); }
 }
 async function finishMic(r) {
+  stopMicLevel(r);
   r.stream.getTracks().forEach(t => t.stop());   // turn the mic (and the OS mic indicator) off
   if (rec === r) rec = null;
   if (r.generation !== micGeneration) return;
@@ -762,7 +818,10 @@ async function finishMic(r) {
     const said = ((await api("/api/transcribe", {method: "POST", body: form})).text || "").trim();
     if (r.generation !== micGeneration) return;
     if (r.petSession && petVoiceState.id === r.petSession) {
-      petVoiceState.text = said; petVoiceState.state = "done"; micHint(""); return;
+      petVoiceState.text = said;
+      petVoiceState.state = said ? "done" : "error";
+      petVoiceState.error = said ? "" : `No speech detected from ${micInfo.input}. Choose another microphone in the dashboard.`;
+      micHint(said ? "" : petVoiceState.error, 5000); return;
     }
     if (!said) return micHint("Didn't catch that. Try again.", 4000);
     const q = $("#q");

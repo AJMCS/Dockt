@@ -43,6 +43,10 @@ loopback control endpoint. It shares microphone permissions and WAV conversion
 with dashboard dictation; the resulting transcript goes to quick chat without
 changing the dashboard's typed draft. Keep the desktop app running (it can be
 hidden), and allow microphone access once in its window.
+Choose the microphone from the dashboard composer's microphone dropdown. The
+selection is remembered and also applies to the pet. While recording, the status
+shows the active input and whether audio is detected; if it stays silent, choose
+another input instead of relying on the system default.
 
 ## The GX10 (models only)
 

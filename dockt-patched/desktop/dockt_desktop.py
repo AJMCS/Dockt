@@ -276,7 +276,7 @@ class Control(BaseHTTPRequestHandler):
                 raise ValueError("invalid request length")
             request = json.loads(self.rfile.read(length))
             action, token = request.get("action"), request.get("id")
-            if action not in ("start", "stop", "status", "cancel") or not isinstance(token, str):
+            if action not in ("start", "stop", "status", "cancel", "devices") or not isinstance(token, str):
                 raise ValueError("invalid voice action")
             uuid.UUID(token)
         except (ValueError, TypeError, AttributeError):

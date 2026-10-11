@@ -179,12 +179,15 @@ assistant answer. For example, a conversation about an NDA deadline might offer
 
 **Desktop window** (L2, `desktop/dockt_desktop.py`, needs `requirements-desktop.txt` = pywebview; WebView2 on Windows):
 - Pet voice bridge: `POST http://127.0.0.1:8765/voice` with JSON
-  `{"action":"start|stop|status|cancel","id":"<UUID>"}` returns
+  `{"action":"start|stop|status|cancel|devices","id":"<UUID>"}` returns
   `{"id":"<UUID>","state":"starting|recording|working|done|cancelled|error","text":"...","error":"..."}`.
   The desktop invokes the dashboard's existing recorder and local transcription
   path; `done.text` goes back to the pet, leaving the dashboard draft untouched.
   Recording and dictation cannot run simultaneously. The pet polls status off
   the Tk thread and cancels by session id. Missing/unready desktop returns 503.
+  `devices` returns the available input labels and selected device id; voice
+  status also includes `input`, `peak` and `muted` diagnostics. The dashboard
+  microphone dropdown persists the input choice used by both entry points.
 - `pythonw desktop\dockt_desktop.py [--mock] [--no-capture] [--open "#/capture/9"]`, or double-click `desktop\Dockt.bat` (sets up `.venv` on first run). `desktop\install-shortcut.ps1` adds Desktop + Start menu shortcuts with the Dockt icon.
 - Port: `DOCKT_PORT` if set (start-dockt.bat sets it), else a Dockt already answering in 8000–8099, else the first free port there (same rule as `agent/find_port.py`). If no Dockt answers, it starts `server/app.py` and `agent/capture.py` itself (GX10 from `gx10.txt` / `DOCKT_GX10`, same env defaults as `start-dockt.bat`), and stops them when the window closes. If the service is already running (e.g. started by the launcher), it only opens the window.
 - One window only. To show it, optionally on a deep link: `GET http://127.0.0.1:8765/open?hash=%23%2Fcapture%2F9` → `ok` (brings the window up and navigates), or run it again with `--open`. This is what the tray's "Open Dockt" and the quick-chat's chips / "Open in Dockt" should call. Suggested for `agent/quickchat.py` `open_dockt()`: try this URL first, fall back to `msedge --app` when it doesn't answer; and in `start-dockt.bat`, replace `start "" msedge --app=%DOCKT_URL%` with `start "" .venv\Scripts\pythonw.exe desktop\dockt_desktop.py` (it reuses the service the launcher started).

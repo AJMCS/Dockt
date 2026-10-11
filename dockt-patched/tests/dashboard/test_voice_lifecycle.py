@@ -2,6 +2,32 @@ from test_dashboard import MIC_STUB
 import uuid
 
 
+def test_selected_microphone_is_used_by_pet_and_remembered(dash):
+    dash.page.add_init_script(MIC_STUB + """
+      navigator.mediaDevices.enumerateDevices = async () => [
+        {kind:'audioinput', deviceId:'airpods', label:'AirPods headset'},
+        {kind:'audioinput', deviceId:'usb', label:'USB microphone'}];
+      const capture = navigator.mediaDevices.getUserMedia;
+      navigator.mediaDevices.getUserMedia = async constraints => {
+        window.__mic.constraints = constraints;
+        const stream = await capture();
+        stream.getAudioTracks = () => [{label:'USB microphone'}];
+        return stream;
+      };
+    """)
+    dash.open()
+    dash.page.wait_for_function("document.querySelector('#micInput').options.length === 3")
+    dash.page.select_option("#micInput", "usb")
+    token = str(uuid.uuid4())
+    dash.page.evaluate("id => petVoiceCommand('start', id)", token)
+    dash.page.wait_for_function("petVoiceState.state === 'recording'")
+    assert dash.js("__mic.constraints.audio.deviceId.exact") == "usb"
+    assert dash.page.evaluate("id => petVoiceCommand('devices', id)", token)["input"] == "USB microphone"
+    dash.page.evaluate("id => petVoiceCommand('cancel', id)", token)
+    dash.page.reload()
+    dash.page.wait_for_function("document.querySelector('#micInput').value === 'usb'")
+
+
 def test_pet_uses_dashboard_audio_pipeline_without_changing_dashboard_draft(dash):
     dash.page.add_init_script(MIC_STUB)
     dash.open()
