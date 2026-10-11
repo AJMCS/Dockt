@@ -10,14 +10,18 @@ import asyncio
 import os
 from pathlib import Path
 
+import httpx
+
 import models
 from memory import store
 
 CONCURRENCY = int(os.environ.get("INGEST_CONCURRENCY", "8"))
 VLM_ENABLED = os.environ.get("VLM_ENABLED", "1") == "1"
+models_down = False  # set by a transport error; the loop backs off before claiming again
 
 
 async def process(row, sem):
+    global models_down
     async with sem:
         try:
             jpeg = Path(row["path"]).read_bytes()
@@ -28,6 +32,11 @@ async def process(row, sem):
             doc = f"{row['app']} — {row['title']}\n{summary}\n{ocr}"[:4000]
             (emb,) = await models.embed([doc])
             store.complete(row["id"], summary, ocr, emb)
+        except httpx.TransportError as e:
+            # GX10 down / network blip: not this capture's fault, so it costs no attempt
+            models_down = True
+            print(f"models unreachable, will retry id={row['id']}: {e!r}")
+            store.requeue(row["id"], repr(e))
         except Exception as e:
             print(f"index error id={row['id']}: {e!r}")
             store.fail(row["id"], repr(e))
@@ -36,7 +45,11 @@ async def process(row, sem):
 async def indexer():
     sem = asyncio.Semaphore(CONCURRENCY)
     inflight: set[asyncio.Task] = set()
+    global models_down
     while True:
+        if models_down:  # back off instead of re-claiming every second while the models are down
+            models_down = False
+            await asyncio.sleep(5)
         free = CONCURRENCY * 2 - len(inflight)
         rows = store.claim(free) if free > 0 else []
         for r in rows:

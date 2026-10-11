@@ -25,8 +25,9 @@ from pathlib import Path
 
 # All "this morning" / "today" / "Sat 14:03" logic uses the local clock. A laptop is
 # already on local time; a headless Linux box may be on UTC, so allow pinning it there.
-os.environ.setdefault("TZ", os.environ.get("DOCKT_TZ", "America/Los_Angeles"))
 if hasattr(time, "tzset"):  # Unix only; Windows has no tzset and needs none
+    # Windows' C runtime can't parse IANA names and would treat this TZ as UTC
+    os.environ.setdefault("TZ", os.environ.get("DOCKT_TZ", "America/Los_Angeles"))
     time.tzset()
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile

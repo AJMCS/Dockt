@@ -104,6 +104,8 @@ class Store:
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_extracted ON captures(status, extracted)")
             # anything mid-flight when we last stopped goes back in the queue
             self.db.execute("UPDATE captures SET status='pending' WHERE status='processing'")
+            # and give up-on rows another go (e.g. errored out during a GX10 outage)
+            self.db.execute("UPDATE captures SET status='pending', attempts=0 WHERE status='error'")
             self.db.execute("UPDATE captures SET extracted=0 WHERE extracted=1")  # 1 = claimed, 2 = done
             self.db.commit()
         self._ids = np.zeros(0, dtype=np.int64)
@@ -155,6 +157,13 @@ class Store:
                 "UPDATE captures SET attempts=attempts+1, error=?, "
                 "status=CASE WHEN attempts+1>=? THEN 'error' ELSE 'pending' END WHERE id=?",
                 (str(err)[:500], max_attempts, cid))
+            self.db.commit()
+
+    def requeue(self, cid, err):
+        """Models unreachable: back in the queue without using up an attempt."""
+        with self.lock:
+            self.db.execute("UPDATE captures SET status='pending', error=? WHERE id=?",
+                            (str(err)[:500], cid))
             self.db.commit()
 
     # ---------- commitments ("things you promised") ----------
