@@ -1469,13 +1469,7 @@ class QuickChat:
                 self.pet.attributes("-transparentcolor", self.pet_background)
             except tk.TclError:
                 self.pet_background = "#101318"
-        elif sys.platform == "darwin":
-            try:   # Tk on macOS has real per-pixel transparency: the robot's edges blend, nothing is keyed out
-                self.pet.attributes("-transparent", True)
-                self.pet_background = "systemTransparent"
-            except tk.TclError:
-                self.pet_background = "#101318"
-        else:
+        else:   # not macOS's "-transparent" either: Tk 8.6 (Aqua) draws no images on such a window
             self.pet_background = "#101318"
         self.pet.configure(bg=self.pet_background)
 
