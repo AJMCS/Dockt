@@ -30,7 +30,7 @@ from PIL import Image, ImageTk
 BASE_URL = os.environ.get("DOCKT_URL", "http://127.0.0.1:8000").rstrip("/")
 DESKTOP_CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
 HOTKEY_ID = 1
-COMPOSER_PLACEHOLDER = "Ask anything you saw: where's dinner tonight? find invoice 4471…"
+COMPOSER_PLACEHOLDER = "Ask anything, or tap the mic"
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 MOD_CONTROL = 0x0002
@@ -921,6 +921,26 @@ def _power_icon(master, color: str, size: int = 14) -> ctk.CTkImage:
     return _OwnedCTkImage(master, light_image=image, dark_image=image, size=(size, size))
 
 
+def _mic_icon(master, color: str, recording: bool = False, size: int = 18) -> ctk.CTkImage:
+    """The dashboard's mic button icon (a stop square while recording), in a 24-unit box."""
+    from PIL import ImageDraw
+    big = size * 8
+    u = big / 24
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    if recording:
+        draw.rounded_rectangle((6.5 * u, 6.5 * u, 17.5 * u, 17.5 * u), radius=2.5 * u, fill=color)
+    else:
+        width = round(2 * u)
+        draw.rounded_rectangle((9 * u, 3 * u, 15 * u, 14 * u), radius=3 * u, outline=color, width=width)
+        draw.arc((5.5 * u, 4.5 * u, 18.5 * u, 17.5 * u), 0, 180, fill=color, width=width)
+        draw.line((12 * u, 17.5 * u, 12 * u, 21 * u), fill=color, width=width)
+        for x, y in ((5.5, 11), (18.5, 11), (12, 21)):   # round line caps
+            draw.ellipse(((x - 1) * u, (y - 1) * u, (x + 1) * u, (y + 1) * u), fill=color)
+    image = image.resize((size * 4, size * 4), Image.Resampling.LANCZOS)
+    return _OwnedCTkImage(master, light_image=image, dark_image=image, size=(size, size))
+
+
 class SendButton(tk.Label):
     """A round send button. CTkButton pads its image sideways, which turns a circle into a pill."""
 
@@ -1370,7 +1390,7 @@ class QuickChat:
         self.placeholder_visible = True
         self.entry.insert("1.0", COMPOSER_PLACEHOLDER, "placeholder")
         self.entry.edit_modified(False)
-        self.entry.grid(row=0, column=0, columnspan=3, sticky="ew",
+        self.entry.grid(row=0, column=0, columnspan=4, sticky="ew",
                         padx=(10, 10), pady=(4, 0))
         self.entry.bind("<Return>", self.submit)
         self.entry.bind("<Shift-Return>", lambda _event: None)
@@ -1392,7 +1412,14 @@ class QuickChat:
             composer, textvariable=self.status, text_color=self.colors["muted"],
             font=SANS_SMALL, wraplength=300, justify="left", anchor="w")
         self.status_label.grid(row=1, column=0, sticky="w", padx=(18, 0), pady=(0, 8))
-        self.ask_button.grid(row=1, column=2, padx=(4, 8), pady=(0, 8), sticky="e")
+        self.ask_button.grid(row=1, column=3, padx=(4, 8), pady=(0, 8), sticky="e")
+        # Voice input, left of send like the dashboard's: the words land in the box, unsent.
+        self.mic_button = ctk.CTkButton(
+            composer, text="", image=_mic_icon(composer, self.colors["muted"]), command=self._toggle_voice,
+            width=36, height=36, corner_radius=18, fg_color="transparent",
+            hover_color=self.colors["surface2"])
+        self.mic_button.grid(row=1, column=2, pady=(0, 8), sticky="e")
+        self._mic_look = (False, self.theme_name)
         self.retry_button = ctk.CTkButton(
             composer, text="Retry", command=self.retry_latest, width=64, height=30,
             corner_radius=10, fg_color="transparent", border_width=1,
@@ -1520,6 +1547,8 @@ class QuickChat:
         if os.name == "nt":
             body = self.pet_body.top if self.pet_body else None
             _keep_topmost(body, self.pet, self.options_panel)   # in order: the controls stay above the body
+        else:   # macOS Tk drops -topmost set before a borderless window is first shown; set it again
+            self.pet.attributes("-topmost", True)
         self.pet.after(2000, self._keep_pet_on_top)
 
     def _draw_pet(self):
@@ -2299,7 +2328,20 @@ class QuickChat:
                                           self.events.put(("speech-done", (gen, error))))
         except queue.Empty:
             pass
+        self._sync_mic_button()
         self.root.after(80, self._drain_events)
+
+    def _sync_mic_button(self):
+        """The quick chat's mic shows a red stop square while the pet's recorder is listening."""
+        button = getattr(self, "mic_button", None)
+        if button is None:
+            return
+        look = (getattr(self, "voice_state", "idle") == "recording", self.theme_name)
+        if look == self._mic_look:
+            return
+        self._mic_look = look
+        color = self.colors["error"] if look[0] else self.colors["muted"]
+        button.configure(image=_mic_icon(button.master, color, look[0]))
 
     def close(self):
         if getattr(self, "speech", None) is not None:

@@ -277,6 +277,7 @@
   .bar:hover, .bar.sel { opacity: 1; }
   .tlaxis { margin-top: 6px; }
   .tlaxis span { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; }
+  #tlIn:disabled, #tlOut:disabled { opacity: .35; cursor: default; background: transparent; }
 
   /* modal */
   #modal { display: none; position: fixed; inset: 0; background: var(--backdrop); z-index: 30; padding: 48px 24px; overflow-y: auto; }
@@ -390,7 +391,7 @@
   <section class="chat">
     <div id="thread"></div>
     <div class="searchrow">
-      <textarea id="q" rows="1" placeholder="Ask anything you saw: where's dinner tonight? find invoice 4471…" autofocus></textarea>
+      <textarea id="q" rows="1" placeholder="Ask anything, or tap the mic" autofocus></textarea>
       <div class="composer-bar">
         <select id="dev" aria-label="Device"><option value="">All devices</option></select>
         <select id="micInput" aria-label="Microphone input" title="Microphone used by dashboard and pet"><option value="">System default mic</option></select>
@@ -422,7 +423,7 @@
       </div>
     </div>
     <div class="view" data-view="timeline">
-      <div class="pane-head"><h3>Timeline</h3><button class="btn icon pane-close" title="Close" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <div class="pane-head"><h3>Timeline <span class="meta" id="tlSpan"></span></h3><button class="btn icon" id="tlOut" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 12h12"/></svg></button><button class="btn icon" id="tlIn" title="Zoom in (or scroll / pinch over the bars)" aria-label="Zoom in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 12h12M12 6v12"/></svg></button><button class="btn icon pane-close" title="Close" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
       <div class="pane-body">
         <div id="timeline"></div>
         <h3 id="tlTitle" hidden></h3>
@@ -533,26 +534,98 @@ function card(r, cited) {
 const devParam = () => $("#dev").value ? "&device=" + encodeURIComponent($("#dev").value) : "";
 
 // ---------- timeline ----------
-const BUCKET = 600, SPAN = 8 * 3600;   // 10-min bars; show at least the last 8 hours
+// Zoom levels: bar size, window length and axis label spacing (seconds). "fit" is the original view:
+// 10-min bars over at least the last 8 hours, more if there's older data, never more than 24 h.
+const ZOOM = [{bucket: 60, span: 3600, label: 900, name: "1 h"},
+              {bucket: 180, span: 3 * 3600, label: 1800, name: "3 h"},
+              {bucket: 600, span: 8 * 3600, fit: true, name: ""},
+              {bucket: 3600, span: 3 * 86400, label: 43200, name: "3 days"}];
+let tlZoom = 2, tlEnd = null;           // tlEnd: last bar's start when panned back; null follows now
+let tlView = null;                      // what's drawn: {first, nb, bucket, min, now}, for zoom-at-cursor and panning
 let tlSel = null;                       // selected bar, kept across refreshes
+let BUCKET = ZOOM[tlZoom].bucket;
 async function refreshTimeline() {
   let data;
-  try { data = await api(`/api/timeline?bucket=${BUCKET}${devParam()}`); } catch { return; }
+  const z = ZOOM[tlZoom], bucket = BUCKET = z.bucket;
+  $("#tlIn").disabled = tlZoom === 0; $("#tlOut").disabled = tlZoom === ZOOM.length - 1;
+  try { data = await api(`/api/timeline?bucket=${bucket}${devParam()}`); } catch { return; }
+  if (bucket !== BUCKET) return;                        // zoomed again while this was loading
   if (!data.length) { $("#timeline").innerHTML = `<div class="empty">No screens captured yet.</div>`; return; }
   const n = {};                                         // all devices on one strip
   data.forEach(d => n[d.b] = (n[d.b] || 0) + d.n);
-  const end = Math.max(...data.map(d => d.b), Math.floor(Date.now() / 1000 / BUCKET) * BUCKET);
-  const start = Math.min(Math.min(...data.map(d => d.b)), end - SPAN + BUCKET);
-  const nb = Math.min((end - start) / BUCKET + 1, 144), first = end - (nb - 1) * BUCKET;   // never more than 24 h
-  const peak = Math.max(...Object.values(n)), step = nb > 72 ? 3 : 1;
+  const now = Math.max(...data.map(d => d.b), Math.floor(Date.now() / 1000 / bucket) * bucket);
+  const min = Math.min(...data.map(d => d.b));
+  let nb, first;
+  if (z.fit) {
+    const start = Math.min(min, now - z.span + bucket);
+    nb = Math.min((now - start) / bucket + 1, 144); first = now - (nb - 1) * bucket;
+  } else {
+    nb = z.span / bucket;
+    const end = tlEnd === null ? now : Math.max(Math.min(tlEnd, now), Math.min(now, min + (nb - 1) * bucket));
+    if (end >= now) tlEnd = null;
+    first = end - (nb - 1) * bucket;
+  }
+  tlView = {first, nb, bucket, min, now};
+  $("#tlSpan").textContent = z.fit ? "" : tlEnd === null ? `last ${z.name}` : `${z.name} · ${fmt(first)}`;
+  const peak = Math.max(1, ...Array.from({length: nb}, (_, i) => n[first + i * bucket] || 0)), step = nb > 72 ? 3 : 1;
   let bars = "", axis = "";
   for (let i = 0; i < nb; i++) {
-    const b = first + i * BUCKET, c = n[b], t = new Date(b * 1000);
+    const b = first + i * bucket, c = n[b], t = new Date(b * 1000);
     bars += `<div class="slot">${c ? `<div class="bar ${b === tlSel ? "sel" : ""}" data-b="${b}" title="${fmt(b)} · ${c} screens" style="height:${Math.max(12, 100 * c / peak)}%"></div>` : ""}</div>`;
-    axis += `<span>${t.getMinutes() === 0 && t.getHours() % step === 0 ? t.toLocaleTimeString([], {hour: "numeric"}) : ""}</span>`;
+    let label = "";
+    if (z.fit) label = t.getMinutes() === 0 && t.getHours() % step === 0 ? t.toLocaleTimeString([], {hour: "numeric"}) : "";
+    else if ((b - t.getTimezoneOffset() * 60) % z.label === 0)   // on the hour/half hour/etc. in local time
+      label = !t.getHours() && !t.getMinutes() && z.label >= 3600 ? t.toLocaleDateString([], {weekday: "short"})
+            : t.toLocaleTimeString([], z.label >= 3600 ? {hour: "numeric"} : {hour: "numeric", minute: "2-digit"});
+    axis += `<span>${label}</span>`;
   }
   $("#timeline").innerHTML = `<div class="tlbars">${bars}</div><div class="tlaxis">${axis}</div>`;
 }
+// Zoom one level in or out, keeping the time at `frac` of the strip (the cursor, or the right end: now) in place.
+function zoomTimeline(dir, frac = 1) {
+  const next = tlZoom + dir;
+  if (next < 0 || next >= ZOOM.length || !tlView) return;
+  const v = tlView, t = v.first + frac * v.nb * v.bucket, z = ZOOM[next];
+  tlZoom = next;
+  tlEnd = z.fit || frac === 1 ? null : Math.floor((t + (1 - frac) * z.span) / z.bucket) * z.bucket - z.bucket;
+  refreshTimeline();
+}
+// Move a zoomed-in strip back or forward in time by `bars` bars.
+function panTimeline(bars) {
+  if (!tlView || ZOOM[tlZoom].fit) return;
+  const v = tlView;
+  tlEnd = (tlEnd === null ? v.now : tlEnd) + Math.round(bars) * v.bucket;
+  refreshTimeline();
+}
+$("#tlIn").onclick = () => zoomTimeline(-1, tlEnd === null ? 1 : 0.5);   // panned back: zoom about the middle
+$("#tlOut").onclick = () => zoomTimeline(1, tlEnd === null ? 1 : 0.5);
+// Over the bars: scroll up / pinch out zooms in at the cursor, horizontal scroll pans (one step per gesture tick).
+let tlWheelAt = 0, tlPanAcc = 0;
+$("#timeline").addEventListener("wheel", e => {
+  if (!tlView) return;
+  e.preventDefault();
+  const r = $("#timeline").getBoundingClientRect(), frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    tlPanAcc += e.deltaX;
+    const w = r.width / tlView.nb;
+    if (Math.abs(tlPanAcc) >= w) { panTimeline(tlPanAcc / w); tlPanAcc = 0; }
+    return;
+  }
+  if (Date.now() - tlWheelAt < 350 || Math.abs(e.deltaY) < 4) return;   // a trackpad sends many small events per swipe
+  tlWheelAt = Date.now();
+  zoomTimeline(e.deltaY < 0 ? -1 : 1, frac);
+}, {passive: false});
+// Safari/WKWebView (the Mac desktop window) reports trackpad pinches as gesture events, not ctrl+wheel.
+let tlScale = 1;
+$("#timeline").addEventListener("gesturestart", e => { e.preventDefault(); tlScale = 1; });
+$("#timeline").addEventListener("gesturechange", e => {
+  e.preventDefault();
+  if (e.scale / tlScale > 1.25 || e.scale / tlScale < 0.8) {
+    const r = $("#timeline").getBoundingClientRect();
+    zoomTimeline(e.scale > tlScale ? -1 : 1, Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
+    tlScale = e.scale;
+  }
+});
 $("#timeline").addEventListener("click", async e => {
   const b = e.target.closest(".bar"); if (!b) return;
   document.querySelectorAll(".bar.sel").forEach(x => x.classList.remove("sel"));
