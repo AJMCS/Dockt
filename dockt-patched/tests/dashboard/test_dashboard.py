@@ -532,6 +532,34 @@ def test_panels_open_from_top_right_like_artifacts(dash):
     assert dash.page.locator(".tab.on").count() == 0
 
 
+@pytest.mark.viewport(1440, 900)
+def test_sources_panel_resizes_by_dragging_its_edge(dash):
+    dash.open().ask("where is dinner tonight")
+    pane_w = lambda: round(dash.page.locator("#pane").bounding_box()["width"])
+    card_w = lambda: dash.page.locator("#sources .card img").first.bounding_box()["width"]
+    start, thumb = pane_w(), card_w()
+    g = dash.page.locator(".pane-resize").bounding_box()
+    x, y = g["x"] + g["width"] / 2, g["y"] + 200
+    dash.page.mouse.move(x, y)
+    dash.page.mouse.down()
+    dash.page.mouse.move(x - 360, y, steps=6)
+    dash.page.mouse.up()
+    assert pane_w() >= start + 300, "dragging the left edge should widen the panel"
+    assert card_w() > thumb * 2, "a wide panel should show bigger screenshots"
+    dash.page.mouse.move(x - 2000, y)   # the chat always keeps a usable column
+    assert dash.page.locator(".chat").bounding_box()["width"] >= 400
+    dash.page.reload()
+    dash.page.wait_for_selector("#pane [data-view=sources]", state="visible")
+    assert pane_w() >= start + 300, "the width is remembered"
+    open_pane(dash, "promises")
+    dash.page.wait_for_timeout(300)
+    assert pane_w() == 440, "each panel keeps its own width"
+    dash.page.click(".tab[data-pane=promises]")
+    dash.page.dblclick(".pane-resize")
+    dash.page.wait_for_timeout(300)
+    assert pane_w() == start, "double-click resets to the default"
+
+
 @pytest.mark.viewport(400, 820)
 def test_phone_panels_overlay_and_close(dash):
     dash.open().ask("where is dinner tonight")

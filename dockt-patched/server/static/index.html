@@ -165,9 +165,18 @@
   .meta { color: var(--muted); font-size: 12px; }
 
   /* side panel: one view at a time (Sources by default; Promises / Timeline from the top-right buttons) */
-  #pane { width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line);
-          background: var(--bg); transition: width .2s ease; }
-  body[data-pane="promises"] #pane, body[data-pane="timeline"] #pane { width: 440px; }
+  /* --pane-w: the width the user dragged this view to (set by the resize handle); else the view's default */
+  #pane { width: var(--pane-w, 300px); flex: none; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line);
+          background: var(--bg); transition: width .2s ease; position: relative; container-type: inline-size; }
+  body[data-pane="promises"] #pane, body[data-pane="timeline"] #pane { width: var(--pane-w, 440px); }
+  /* drag the panel's left edge to resize it; double-click resets; arrow keys when focused */
+  .pane-resize { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: col-resize; z-index: 2; touch-action: none; }
+  .pane-resize::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background .15s; }
+  .pane-resize:hover::after, .pane-resize:focus-visible::after, body.pane-resizing .pane-resize::after { background: var(--accent); }
+  .pane-resize:focus-visible { outline: none; }
+  body.pane-resizing { cursor: col-resize; -webkit-user-select: none; user-select: none; }
+  body.pane-resizing #pane { transition: none; }
+  body.pane-resizing iframe, body.pane-resizing img { pointer-events: none; }
   #pane .view { display: none; flex: 1; min-height: 0; flex-direction: column; }
   body[data-pane="sources"] #pane [data-view="sources"], body[data-pane="promises"] #pane [data-view="promises"],
   body[data-pane="timeline"] #pane [data-view="timeline"] { display: flex; }
@@ -184,6 +193,20 @@
   .cards .card .body { padding: 7px 10px 8px; }
   .cards .card .meta { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cards .card .sum { font-size: 13px; line-height: 1.4; -webkit-line-clamp: 2; margin-top: 2px; }
+  /* a wider panel shows more of each screenshot: bigger thumbnails, then a grid of full cards */
+  @container (min-width: 440px) {
+    .cards .card { grid-template-columns: 150px minmax(0, 1fr); }
+    .cards .card img { width: 150px; min-height: 96px; }
+    .cards .card .sum { -webkit-line-clamp: 3; }
+  }
+  @container (min-width: 620px) {
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    .cards .card { display: block; }
+    .cards .card img { width: 100%; height: auto; min-height: 0; aspect-ratio: 16/10; border-right: 0; border-bottom: 1px solid var(--line); }
+    .cards .card .body { padding: 10px 12px 12px; }
+    .cards .card .sum { font-size: 14px; -webkit-line-clamp: 4; }
+    .cards .empty { grid-column: 1 / -1; }
+  }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; cursor: pointer;
           transition: border-color .15s, box-shadow .15s; }
   .card:hover, .card.cited { border-color: var(--accent); }
@@ -244,7 +267,7 @@
   /* narrower windows: the panel slides in over the chat instead of sitting beside it */
   @media (max-width: 1100px) {
     .topbar .narrow-only { display: flex; }
-    #pane, body[data-pane] #pane { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); z-index: 18;
+    #pane, body[data-pane] #pane { position: fixed; top: 0; right: 0; bottom: 0; width: min(var(--pane-w, 440px), 100vw); z-index: 18;
              transform: translateX(100%); transition: transform .2s ease; box-shadow: var(--shadow); }
     body.pane-open #pane { transform: none; }
     body.pane-open #scrim { display: block; }
@@ -315,6 +338,7 @@
     </div>
   </section>
   <aside id="pane">
+    <div class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize panel" title="Drag to resize · double-click to reset" tabindex="0"></div>
     <div class="view" data-view="sources">
       <div class="pane-head"><h3 id="sourcesTitle">Sources</h3><button class="btn icon pane-close" title="Close" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
       <div class="pane-body"><div class="cards" id="sources"></div></div>
@@ -615,10 +639,59 @@ const narrow = () => matchMedia("(max-width: 1100px)").matches;   // panel overl
 const paneVisible = () => !narrow() || document.body.classList.contains("pane-open");
 function setPane(name, open = true) {
   document.body.dataset.pane = name;
+  applyPaneWidth();
   document.body.classList.toggle("pane-open", open && narrow());
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", paneVisible() && b.dataset.pane === name && (name !== "sources" || narrow())));
 }
 function closePane() { narrow() ? setPane(document.body.dataset.pane, false) : setPane("sources"); }
+
+// resizable panel: each view remembers its own width (localStorage); no stored width = the CSS default
+const PANE_W_KEY = "dockt-pane-w", PANE_MIN = 260;
+let paneWidths = {};
+try { paneWidths = JSON.parse(localStorage.getItem(PANE_W_KEY) || "{}") || {}; } catch {}
+function paneMax() {   // leave the chat a usable column beside the panel; as an overlay, leave a strip of chat showing
+  return narrow() ? window.innerWidth - 40 : Math.max(PANE_MIN, $("main").clientWidth - 420);
+}
+function applyPaneWidth() {
+  const w = paneWidths[document.body.dataset.pane];
+  w ? $("#pane").style.setProperty("--pane-w", Math.min(w, paneMax()) + "px") : $("#pane").style.removeProperty("--pane-w");
+}
+function setPaneWidth(w, save = true) {
+  const view = document.body.dataset.pane;
+  if (w == null) delete paneWidths[view];
+  else paneWidths[view] = Math.round(Math.max(PANE_MIN, Math.min(w, paneMax())));
+  applyPaneWidth();
+  if (save) try { localStorage.setItem(PANE_W_KEY, JSON.stringify(paneWidths)); } catch {}
+}
+{
+  const grip = $(".pane-resize");
+  grip.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    document.body.classList.add("pane-resizing");
+    const right = $("#pane").getBoundingClientRect().right;
+    const move = ev => setPaneWidth(right - ev.clientX, false);
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      document.body.classList.remove("pane-resizing");
+      setPaneWidth($("#pane").getBoundingClientRect().width);   // save once, at the end of the drag
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up, {once: true});
+    grip.addEventListener("pointercancel", up, {once: true});
+  });
+  grip.ondblclick = () => setPaneWidth(null);
+  grip.onkeydown = e => {
+    const step = e.shiftKey ? 80 : 24, w = $("#pane").getBoundingClientRect().width;
+    if (e.key === "ArrowLeft") setPaneWidth(w + step);        // the handle is on the left edge: left = wider
+    else if (e.key === "ArrowRight") setPaneWidth(w - step);
+    else if (e.key === "Home" || e.key === "Escape") setPaneWidth(null);
+    else return;
+    e.preventDefault();
+  };
+  window.addEventListener("resize", applyPaneWidth);
+}
 document.querySelectorAll(".tab").forEach(b => b.onclick = () =>
   b.classList.contains("on") ? closePane() : setPane(b.dataset.pane));
 document.querySelectorAll(".pane-close").forEach(b => b.onclick = closePane);
@@ -834,7 +907,9 @@ async function route() {
   history.replaceState(null, "", location.pathname);   // so the same link works twice and a reload doesn't re-ask
 }
 window.addEventListener("hashchange", route);
+$("#pane").style.transition = "none";   // a remembered width applies at once, without growing in on load
 setPane("sources", false);   // narrow windows start with the panel closed
+requestAnimationFrame(() => requestAnimationFrame(() => $("#pane").style.transition = ""));
 route();
 
 // ---------- theme ----------
