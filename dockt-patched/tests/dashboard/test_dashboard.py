@@ -347,8 +347,17 @@ def test_timeline_slot_lists_its_screens_and_new_chat_clears(dash):
 
 
 # ---------------------------------------------------------------- recent chats (sidebar)
-def chat_titles(dash):
-    return dash.page.locator("#chatList li[data-id] .ctitle").all_inner_texts()
+def chat_titles(dash, expect: list[str] | None = None):
+    """Titles in Recents. History is saved through the local service, so the list updates a moment
+    after each change: pass `expect` to wait for it (up to 5 s)."""
+    titles = lambda: dash.page.locator("#chatList li[data-id] .ctitle").all_inner_texts()
+    if expect is not None:
+        for _ in range(50):
+            if titles() == expect:
+                break
+            dash.page.wait_for_timeout(100)
+        assert titles() == expect, f"Recents shows {titles()}, expected {expect}"
+    return titles()
 
 
 def test_recent_chats_lifecycle(dash):
@@ -356,11 +365,10 @@ def test_recent_chats_lifecycle(dash):
     assert dash.page.inner_text("#chatList") == "No chats yet."
     dash.ask("where is dinner tonight")
     dash.page.reload()
-    dash.page.wait_for_selector("#chatList li[data-id]")
-    assert chat_titles(dash) == ["where is dinner tonight"]
+    assert chat_titles(dash, ["where is dinner tonight"]) == ["where is dinner tonight"]
     dash.page.click("#newChat")
     dash.ask("find invoice 4471")
-    assert chat_titles(dash) == ["find invoice 4471", "where is dinner tonight"]
+    assert chat_titles(dash, ["find invoice 4471", "where is dinner tonight"])
     assert dash.page.inner_text("#chatList li.on .ctitle") == "find invoice 4471"
     # reopen the older chat: answer, chips and sources come back
     dash.page.locator("#chatList li", has_text="where is dinner").click()
@@ -369,21 +377,23 @@ def test_recent_chats_lifecycle(dash):
     assert_cited_first(dash, ids)
     # continuing it moves it to the top instead of creating a new entry
     dash.ask("who booked it")
-    assert chat_titles(dash) == ["where is dinner tonight", "find invoice 4471"]
+    assert chat_titles(dash, ["where is dinner tonight", "find invoice 4471"])
     assert dash.js("messages.length") == 4
     # delete the other one
     other = dash.page.locator("#chatList li", has_text="invoice")
     other.hover()
     other.locator(".del").click()
-    assert chat_titles(dash) == ["where is dinner tonight"]
+    assert chat_titles(dash, ["where is dinner tonight"])
 
 
-def test_saved_chats_are_small_and_local(dash):
+def test_chats_saved_in_local_store_shared_with_pet(dash, dockt):
+    """History lives in the local service (shared with Lane 1's quick-chat pet), not in browser storage."""
     dash.open().ask("where is dinner tonight")
-    raw = dash.js("localStorage.getItem('dockt-chats')")
-    saved = json.loads(raw)
-    assert len(saved) == 1 and saved[0]["messages"][1]["sources"]
-    assert '"ocr"' not in raw, "screen text should not be stored in chat history"
+    dash.page.wait_for_function("document.querySelectorAll('#chatList li[data-id]').length === 1")
+    saved = dockt.get("/api/conversations")
+    assert [c["title"] for c in saved] == ["where is dinner tonight"]
+    assert [m["role"] for m in saved[0]["messages"]] == ["user", "assistant"]
+    assert dash.js("localStorage.getItem('dockt-chats')") is None
 
 
 def test_saved_chats_open_when_gx10_is_down(dash):

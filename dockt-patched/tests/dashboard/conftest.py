@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,11 @@ def post_json(url: str, body: dict):
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=5) as r:
         return json.loads(r.read())
+
+
+def delete(url: str):
+    with urllib.request.urlopen(urllib.request.Request(url, method="DELETE"), timeout=5) as r:
+        return r.status
 
 
 def wait_until(check, timeout: float, what: str):
@@ -85,7 +91,8 @@ def dockt(tmp_path_factory):
         wait_until(lambda: len(get_json(base + "/api/commitments?hours=48")["items"]) >= 3, 120, "promise extraction")
         yield SimpleNamespace(base=base, logs=logs,
                               get=lambda path: get_json(base + path),
-                              post=lambda path, body: post_json(base + path, body))
+                              post=lambda path, body: post_json(base + path, body),
+                              delete=lambda path: delete(base + path))
     finally:
         for p in reversed(procs):
             p.terminate()
@@ -155,6 +162,9 @@ def context(browser, request):
 
 @pytest.fixture
 def dash(context, dockt):
+    # chat history is shared through the local service now (/api/conversations), so start each test empty
+    for c in dockt.get("/api/conversations"):
+        dockt.delete("/api/conversations/" + urllib.parse.quote(c["id"], safe=""))
     d = Dash(context.new_page(), dockt.base)
     yield d
     assert not d.errors, f"uncaught JS errors: {d.errors}"

@@ -100,7 +100,7 @@ idle screen sends nothing. "New" is relative to how busy the screen normally is.
 .venv\Scripts\python -m pytest tests -q
 ```
 
-There are 93 tests: the dashboard in a real browser (Edge on Windows, Chrome elsewhere), the desktop helpers, the local API and the quick-chat. The 25 quick-chat tests need tkinter, which Windows Python includes. The suite starts its own mock stack on free ports with a temporary `DATA_DIR`, so it never touches your index or a running Dockt. Run it before pushing; details are in [`tests/dashboard/README.md`](tests/dashboard/README.md).
+It covers the dashboard in a real browser (Edge on Windows, Chrome elsewhere), the desktop helpers, the local API and the quick-chat. The quick-chat tests need tkinter: Windows Python includes it, and on macOS with Homebrew Python run `brew install python-tk@3.11`. The suite starts its own mock stack on free ports with a temporary `DATA_DIR`, so it never touches your index or a running Dockt. Run it before pushing; details are in [`tests/dashboard/README.md`](tests/dashboard/README.md).
 
 ## Demo checklist
 
