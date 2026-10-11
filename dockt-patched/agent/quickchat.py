@@ -251,8 +251,8 @@ class QuickChat:
         self.colors = PALETTES["dark" if _system_dark_mode() else "light"]
         self.chat = ctk.CTkToplevel(self.root, fg_color=self.colors["bg"])
         self.chat.title("Dockt Quick Chat")
-        self.chat.geometry("560x440")
-        self.chat.minsize(480, 360)
+        self.chat.geometry("720x600")
+        self.chat.minsize(560, 460)
         self.chat.attributes("-topmost", True)
         self.chat.withdraw()
         self.chat.protocol("WM_DELETE_WINDOW", self.hide)
@@ -266,6 +266,7 @@ class QuickChat:
         self.latest_question = ""
         self.retry_payload = None
         self.photos: list[ImageTk.PhotoImage] = []
+        self._composer_resize_job = None
         self._style()
         self._build()
         self._create_pet()
@@ -345,7 +346,11 @@ class QuickChat:
                                   relief="flat", padx=10, pady=10, font=("Segoe UI", 12),
                                   spacing1=2, spacing3=10, highlightthickness=0,
                                   takefocus=False)
-        self.transcript.pack(fill="both", expand=True, padx=9, pady=8)
+        self.transcript.pack(side="left", fill="both", expand=True, padx=(9, 0), pady=8)
+        transcript_scrollbar = ttk.Scrollbar(transcript_card, orient="vertical",
+                                             command=self.transcript.yview)
+        transcript_scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
+        self.transcript.configure(yscrollcommand=transcript_scrollbar.set)
         self.transcript.tag_configure("user", foreground=self.colors["text"],
                                       font=("Segoe UI", 10, "bold"), justify="right",
                                       spacing1=10)
@@ -380,7 +385,6 @@ class QuickChat:
         self.entry.grid(row=0, column=0, sticky="ew")
         self.entry.bind("<Return>", self.submit)
         self.entry.bind("<Shift-Return>", lambda _event: None)
-        self.entry.bind("<KeyRelease>", self._resize_composer, add="+")
         self.entry.bind("<<Modified>>", self._composer_modified, add="+")
         self.entry.bind("<FocusIn>", self._clear_composer_placeholder, add="+")
         self.entry.bind("<FocusOut>", self._show_composer_placeholder, add="+")
@@ -706,6 +710,9 @@ class QuickChat:
         scale = ctk.ScalingTracker.get_window_scaling(self.chat)
         width, height = self.chat.winfo_width(), self.chat.winfo_height()
         screen_width, screen_height = self.chat.winfo_screenwidth(), self.chat.winfo_screenheight()
+        width = min(width, max(480, screen_width - 32))
+        height = min(height, max(360, screen_height - 64))
+        self.chat.minsize(min(560, width), min(460, height))
         x = max(0, (screen_width - width) / 2)
         y = max(0, (screen_height - height) / 2)
         self.chat.geometry(f"{round(width/scale)}x{round(height/scale)}+{round(x/scale)}+{round(y/scale)}")
@@ -759,13 +766,24 @@ class QuickChat:
             self.entry.mark_set("insert", "end-1c")
 
     def _resize_composer(self, _event=None):
+        self._composer_resize_job = None
         lines = self.entry._textbox.count("1.0", "end-1c", "displaylines") or (1,)
-        self.entry.configure(height=max(44, min(128, 34 * lines[0])))
+        desired_height = max(44, min(128, 34 * lines[0]))
+        if int(self.entry.cget("height")) != desired_height:
+            self.entry.configure(height=desired_height)
+
+    def _schedule_composer_resize(self):
+        if self._composer_resize_job is not None:
+            try:
+                self.root.after_cancel(self._composer_resize_job)
+            except tk.TclError:
+                pass
+        self._composer_resize_job = self.root.after(140, self._resize_composer)
 
     def _composer_modified(self, _event=None):
         if self.entry.edit_modified():
             self.entry.edit_modified(False)
-            self._resize_composer()
+            self._schedule_composer_resize()
 
     def _clear_composer_placeholder(self, _event=None):
         if self.placeholder_visible:
