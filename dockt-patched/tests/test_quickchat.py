@@ -654,3 +654,70 @@ class VoiceInputTests(unittest.TestCase):
                 with self.assertRaises(quickchat.VoiceError) as caught:
                     quickchat.transcribe_audio(b"RIFF")
                 self.assertEqual(caught.exception.short, short)
+
+
+class ListeningRecorderTests(unittest.TestCase):
+    """The pet mic's sounddevice recorder: loudness per block, a WAV at the end, and the fallback."""
+
+    class FakeSounddevice:
+        """Stands in for the sounddevice module: the stream 'records' the given blocks when started."""
+
+        def __init__(self, blocks, fail=False):
+            self.blocks, self.fail, self.streams = blocks, fail, []
+            test = self
+
+            class InputStream:
+                def __init__(self, samplerate, channels, dtype, blocksize, callback):
+                    test.streams.append(self)
+                    self.settings = (samplerate, channels, dtype, blocksize)
+                    self.callback, self.stopped, self.closed = callback, False, False
+
+                def start(self):
+                    if test.fail:
+                        raise RuntimeError("Error querying device -1")
+                    for block in test.blocks:
+                        self.callback(block.reshape(-1, 1), len(block), None, None)
+
+                def stop(self):
+                    self.stopped = True
+
+                def close(self):
+                    self.closed = True
+
+            self.InputStream = InputStream
+
+    def test_records_16k_mono_and_reports_each_blocks_loudness(self):
+        import numpy as np
+        import wave as wavefile
+        from io import BytesIO
+        quiet = np.zeros(1600, dtype=np.int16)
+        loud = np.full(1600, 16384, dtype=np.int16)   # half scale: RMS 0.5
+        fake = self.FakeSounddevice([quiet, loud])
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            recorder = quickchat.new_recorder()
+            self.assertIsInstance(recorder, quickchat.StreamRecorder)
+            recorder.start()
+        self.assertEqual(fake.streams[0].settings, (16000, 1, "int16", 1600))
+        levels = recorder.levels()
+        self.assertEqual(len(levels), 2)
+        self.assertAlmostEqual(levels[0], 0.0)
+        self.assertAlmostEqual(levels[1], 0.5, places=3)
+        self.assertEqual(recorder.levels(), [], "levels are handed over once")
+        with wavefile.open(BytesIO(recorder.stop())) as w:
+            self.assertEqual((w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()),
+                             (16000, 1, 2, 3200))
+        self.assertTrue(fake.streams[0].stopped and fake.streams[0].closed, "the mic is released")
+
+    def test_a_device_error_is_an_oserror_and_releases_the_stream(self):
+        fake = self.FakeSounddevice([], fail=True)
+        with patch.dict(sys.modules, {"sounddevice": fake}):
+            recorder = quickchat.new_recorder()
+            with self.assertRaisesRegex(OSError, "querying device"):
+                recorder.start()
+        self.assertTrue(fake.streams[0].closed)
+
+    def test_falls_back_to_click_to_stop_recording_without_sounddevice(self):
+        with patch.dict(sys.modules, {"sounddevice": None}):   # None makes the import fail
+            recorder = quickchat.new_recorder()
+        self.assertIsInstance(recorder, quickchat.MicRecorder)
+        self.assertFalse(hasattr(recorder, "levels"), "MCI can't hear levels, so stopping is by click")

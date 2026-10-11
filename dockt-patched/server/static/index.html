@@ -577,7 +577,57 @@ $("#dev").onchange = () => { refreshPromises(); refreshTimeline(); };
 // The text lands in the box rather than being sent, so a misheard word can be fixed first.
 const MIC_LIMIT_MS = 60000;
 const PLACEHOLDER = $("#q").placeholder;
-let rec = null;   // the recording in progress: {recorder, stream, chunks, timer, cancelled}
+let rec = null;   // the recording in progress: {recorder, stream, chunks, timer, cancelled, stopMeter}
+// Decides when someone has finished speaking from each 100 ms block's loudness (RMS, 0..1). Same rules as
+// EndOfSpeech in agent/quickchat.py: measure the room in the first 300 ms, let the floor only move down
+// (recounting earlier blocks if they were talking during the measurement), then stop after 1.2 s of quiet.
+class EndOfSpeech {
+  constructor() { this.floor = null; this.calibration = []; this.history = []; this.elapsed = this.speech = this.quiet = 0; }
+  static loud(floor) { return Math.max(floor * 3, floor + 0.004, 0.006); }
+  feed(rms, ms) {   // null while listening, "done" when speech has ended, "silent" if nobody spoke
+    this.elapsed += ms;
+    this.history.push(rms);
+    if (this.floor === null) {
+      this.calibration.push(rms);
+      if (this.elapsed < 300) return null;
+      const sorted = [...this.calibration].sort((a, b) => a - b);
+      this.floor = Math.min(Math.max(sorted[Math.floor(sorted.length / 2)], 0.0003), 0.03);
+    }
+    const quieter = Math.max(rms, 0.0003);
+    if (quieter < this.floor) {
+      this.floor = quieter;
+      const loud = EndOfSpeech.loud(this.floor);
+      this.speech = ms * this.history.slice(0, -1).filter(level => level >= loud).length;
+    }
+    const loud = EndOfSpeech.loud(this.floor);
+    if (rms >= loud) { this.speech += ms; this.quiet = 0; }
+    else if (rms < loud * 0.7) this.quiet += ms;
+    if (this.speech >= 250 && this.quiet >= 1200) return "done";
+    if (this.speech < 250 && this.elapsed >= 8000) return "silent";
+    return null;
+  }
+}
+// Listen to the stream's level and report "done" / "silent" once. Returns a function that stops listening.
+// Without Web Audio (or on a stream it can't read) it does nothing, and the mic stops on click as before.
+function watchSpeech(stream, onVerdict) {
+  let ctx, timer;
+  const stop = () => { clearInterval(timer); if (ctx) ctx.close().catch(() => {}); };
+  try {
+    ctx = new AudioContext();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const samples = new Float32Array(analyser.fftSize), eos = new EndOfSpeech();
+    timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const v of samples) sum += v * v;
+      const verdict = eos.feed(Math.sqrt(sum / samples.length), 100);
+      if (verdict) { stop(); onVerdict(verdict); }
+    }, 100);
+  } catch { stop(); }
+  return stop;
+}
 function micHint(text, ms) {   // the placeholder doubles as the status line; it shows while the box is empty
   clearTimeout(micHint.timer);
   $("#q").placeholder = text || PLACEHOLDER;
@@ -603,13 +653,19 @@ async function startMic() {
   recorder.onstop = () => finishMic(r);
   r.timer = setTimeout(stopMic, MIC_LIMIT_MS);
   recorder.start();
+  r.stopMeter = watchSpeech(stream, verdict => {
+    if (rec !== r) return;
+    if (verdict === "silent") r.hint = "Didn't hear anything. Try again.";
+    stopMic(verdict === "silent");
+  });
   setMic("recording");
-  micHint("Listening… click the mic again to stop.");
+  micHint("Listening… stops when you're done, or click the mic.");
 }
 function stopMic(cancel = false) {
   if (!rec) return;
   rec.cancelled = cancel === true;
   clearTimeout(rec.timer);
+  rec.stopMeter && rec.stopMeter();
   if (rec.recorder.state !== "inactive") rec.recorder.stop();
 }
 // Whisper servers differ in which compressed formats they decode; 16 kHz mono WAV works everywhere.
@@ -634,7 +690,7 @@ async function toWav16k(blob) {
 async function finishMic(r) {
   r.stream.getTracks().forEach(t => t.stop());   // turn the mic (and the OS mic indicator) off
   if (rec === r) rec = null;
-  if (r.cancelled || !r.chunks.length) { setMic("idle"); micHint(""); return; }
+  if (r.cancelled || !r.chunks.length) { setMic("idle"); micHint(r.hint || "", r.hint ? 4000 : 0); return; }
   setMic("working");
   micHint("Transcribing…");
   try {
@@ -804,7 +860,7 @@ $("#sbToggle").onclick = () => matchMedia("(max-width: 900px)").matches
 setSidebarCollapsed(document.documentElement.classList.contains("sb-collapsed"));
 
 // ---------- side panel: Sources / Promises / Timeline are tabs, top right; the open one is highlighted ----------
-// Clicking the open tab (or the panel's x) closes the panel. Wide windows start on Sources, narrow ones closed.
+// Clicking the open tab (or the panel's x) closes the panel. It starts closed.
 const narrow = () => matchMedia("(max-width: 1100px)").matches;   // panel overlays the chat below this width
 const paneVisible = () => narrow() ? document.body.classList.contains("pane-open")
                                    : !document.body.classList.contains("pane-shut");
@@ -1154,7 +1210,7 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 $("#pane").style.transition = "none";   // a remembered width applies at once, without growing in on load
-setPane("sources", !narrow());   // wide windows start on Sources; narrow ones with the panel closed
+setPane("sources", false);   // the panel starts closed; the Sources tab opens it
 requestAnimationFrame(() => requestAnimationFrame(() => $("#pane").style.transition = ""));
 route();
 
