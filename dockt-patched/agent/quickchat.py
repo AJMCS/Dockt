@@ -1776,8 +1776,8 @@ class QuickChat:
             self.voice_conversation = False
 
     def _start_voice(self):
-        try:
-            recorder = MicRecorder()
+        try:   # Windows: the dashboard WebView's recorder; macOS: sounddevice (WKWebView can't ask for the mic)
+            recorder = MicRecorder() if os.name == "nt" else new_recorder()
             recorder.start()
         except (OSError, AttributeError) as exc:
             self.show()
@@ -1830,7 +1830,11 @@ class QuickChat:
 
         def work():
             try:
-                self.events.put(("voice-text", (generation, recorder.stop())))
+                result = recorder.stop()   # MicRecorder hands back text, StreamRecorder a WAV to transcribe
+                self.events.put(("voice-text", (generation, transcribe_audio(result) if isinstance(result, bytes)
+                                                else result)))
+            except VoiceError as exc:
+                self.events.put(("voice-error", (generation, exc)))
             except OSError as exc:
                 recorder.cancel()
                 self.events.put(("voice-error", (generation, VoiceError("Voice input failed", str(exc)))))

@@ -8,3 +8,5 @@ faster-whisper>=1.1
 av<19
 # Neural local text-to-speech for the desktop pet (model weights download on first reply).
 kokoro-onnx>=0.6.1
+# The pet's mic on macOS (agent/quickchat.py StreamRecorder): pywebview's WKWebView can't ask for the mic.
+sounddevice>=0.4; sys_platform == "darwin"

@@ -19,11 +19,11 @@ fi
   fail "this Python has no Tk. Use Python from python.org, or run: brew install python-tk@3.12 (match your version), then delete .venv and start again."
 
 # keep the marker in step with start-dockt.bat, so both reinstall when requirements change
-if [ ! -f .venv/.dockt-deps-installed-v5 ]; then
+if [ ! -f .venv/.dockt-deps-installed-v6 ]; then
   echo "Installing Dockt desktop requirements. This can take a few minutes the first time..."
   .venv/bin/python -m pip install -r requirements-server.txt -r requirements-agent.txt -r requirements-desktop.txt ||
     fail "installing the requirements failed (see above)"
-  touch .venv/.dockt-deps-installed-v5
+  touch .venv/.dockt-deps-installed-v6
 fi
 
 echo "Starting the Dockt desktop app, capture service and quick chat..."

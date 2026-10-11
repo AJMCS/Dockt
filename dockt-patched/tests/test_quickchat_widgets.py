@@ -33,6 +33,13 @@ class QuickChatWidgetTests(unittest.TestCase):
     def setUpClass(cls):
         quickchat._enable_windows_dpi_awareness()
 
+    def setUp(self):
+        # Off Windows the pet records with new_recorder(); route it through MicRecorder so the
+        # voice tests' MicRecorder fakes apply on every OS (a test can still patch new_recorder).
+        patcher = patch.object(quickchat, "new_recorder", lambda: quickchat.MicRecorder())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def make_app(self, scaling, pet_dpi=False):
         ctk.ScalingTracker.window_widgets_dict.clear()
         ctk.ScalingTracker.window_dpi_scaling_dict.clear()
@@ -438,7 +445,7 @@ class QuickChatWidgetTests(unittest.TestCase):
         root, app = self.make_app(96/72)
         recorder = Mock()
         recorder.levels.return_value = []
-        with patch.object(quickchat, "MicRecorder", return_value=recorder), \
+        with patch.object(quickchat, "new_recorder", return_value=recorder), \
                 patch.object(quickchat.os, "name", "posix"):   # e.g. macOS: no "Voice needs Windows" any more
             app._start_voice()
         self.assertEqual(app.voice_state, "recording")
