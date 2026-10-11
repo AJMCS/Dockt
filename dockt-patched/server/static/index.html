@@ -150,6 +150,19 @@
   .go:hover { background: var(--accent-hover); }
   .go:disabled { opacity: .4; cursor: wait; }
   .go svg { width: 18px; height: 18px; }
+  /* voice input: a quiet round button left of send; red with a soft pulse while recording */
+  .mic { margin-left: auto; width: 36px; height: 36px; border-radius: 50%; border: 0; padding: 0; display: grid; place-items: center;
+         background: transparent; color: var(--muted); cursor: pointer; transition: background .15s, color .15s; }
+  .mic + .go { margin-left: 0; }
+  .mic:hover { background: var(--hover); color: var(--text); }
+  .mic:disabled { opacity: .4; cursor: wait; }
+  .mic svg { width: 18px; height: 18px; }
+  .mic .i-stop { display: none; }
+  .mic.recording { color: var(--bad-text); background: var(--hover); animation: micpulse 1.4s ease-in-out infinite; }
+  .mic.recording .i-mic { display: none; }
+  .mic.recording .i-stop { display: inline; }
+  @keyframes micpulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--bad-text) 18%, transparent); } }
+  @media (prefers-reduced-motion: reduce) { .mic.recording { animation: none; } }
 
   /* recent chats */
   #history { flex: 1; min-height: 0; overflow-y: auto; margin-top: 8px; }
@@ -173,7 +186,7 @@
          transition: background .15s, border-color .15s; }
   .btn:hover { background: var(--hover); }
   .btn.icon { border-color: transparent; }
-  .btn:focus-visible, .go:focus-visible, .cite:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn:focus-visible, .go:focus-visible, .mic:focus-visible, .cite:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .meta { color: var(--muted); font-size: 12px; }
 
   /* side panel: one view at a time (Sources by default; Promises / Timeline from the top-right buttons) */
@@ -377,6 +390,10 @@
       <textarea id="q" rows="1" placeholder="Ask anything you saw: where's dinner tonight? find invoice 4471…" autofocus></textarea>
       <div class="composer-bar">
         <select id="dev" aria-label="Device"><option value="">All devices</option></select>
+        <button class="mic" id="mic" type="button" title="Voice input" aria-label="Start voice input" aria-pressed="false">
+          <svg class="i-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+          <svg class="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg>
+        </button>
         <button class="go" id="go" title="Send" aria-label="Send">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
         </button>
@@ -556,6 +573,91 @@ $("#go").onclick = run;
 $("#q").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); run(); } });
 $("#q").addEventListener("input", autosize);
 $("#dev").onchange = () => { refreshPromises(); refreshTimeline(); };
+
+// ---------- voice input: record here, transcribe on the local service (POST /api/transcribe -> Whisper) ----------
+// The text lands in the box rather than being sent, so a misheard word can be fixed first.
+const MIC_LIMIT_MS = 60000;
+const PLACEHOLDER = $("#q").placeholder;
+let rec = null;   // the recording in progress: {recorder, stream, chunks, timer, cancelled}
+function micHint(text, ms) {   // the placeholder doubles as the status line; it shows while the box is empty
+  clearTimeout(micHint.timer);
+  $("#q").placeholder = text || PLACEHOLDER;
+  if (text && ms) micHint.timer = setTimeout(() => { $("#q").placeholder = PLACEHOLDER; }, ms);
+}
+function setMic(state) {   // "idle" | "recording" | "working"
+  const b = $("#mic"), on = state === "recording";
+  b.classList.toggle("recording", on);
+  b.disabled = state === "working";
+  b.setAttribute("aria-pressed", String(on));
+  b.setAttribute("aria-label", on ? "Stop recording" : "Start voice input");
+  b.title = on ? "Stop and transcribe (Esc cancels)" : "Voice input";
+}
+async function startMic() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
+    return micHint("Voice input isn't available in this window.", 4000);
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
+  catch { return micHint("Microphone blocked. Allow mic access for Dockt, then try again.", 5000); }
+  const recorder = new MediaRecorder(stream);
+  const r = rec = {recorder, stream, chunks: [], cancelled: false};
+  recorder.ondataavailable = e => { if (e.data && e.data.size) r.chunks.push(e.data); };
+  recorder.onstop = () => finishMic(r);
+  r.timer = setTimeout(stopMic, MIC_LIMIT_MS);
+  recorder.start();
+  setMic("recording");
+  micHint("Listening… click the mic again to stop.");
+}
+function stopMic(cancel = false) {
+  if (!rec) return;
+  rec.cancelled = cancel === true;
+  clearTimeout(rec.timer);
+  if (rec.recorder.state !== "inactive") rec.recorder.stop();
+}
+// Whisper servers differ in which compressed formats they decode; 16 kHz mono WAV works everywhere.
+async function toWav16k(blob) {
+  const ctx = new AudioContext();
+  try {
+    const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const offline = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * 16000)), 16000);
+    const src = offline.createBufferSource();
+    src.buffer = decoded; src.connect(offline.destination); src.start();
+    const pcm = (await offline.startRendering()).getChannelData(0);
+    const view = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+    const ascii = (at, s) => [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+    ascii(0, "RIFF"); view.setUint32(4, 36 + pcm.length * 2, true); ascii(8, "WAVEfmt ");
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);   // PCM, mono
+    view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    ascii(36, "data"); view.setUint32(40, pcm.length * 2, true);
+    pcm.forEach((s, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, s)) * 0x7fff, true));
+    return new Blob([view], {type: "audio/wav"});
+  } finally { ctx.close(); }
+}
+async function finishMic(r) {
+  r.stream.getTracks().forEach(t => t.stop());   // turn the mic (and the OS mic indicator) off
+  if (rec === r) rec = null;
+  if (r.cancelled || !r.chunks.length) { setMic("idle"); micHint(""); return; }
+  setMic("working");
+  micHint("Transcribing…");
+  try {
+    const recorded = new Blob(r.chunks, {type: r.recorder.mimeType || "audio/webm"});
+    const audio = await toWav16k(recorded).catch(() => recorded);   // can't decode it here: send as recorded
+    const form = new FormData();
+    form.append("audio", audio, audio.type === "audio/wav" ? "speech.wav" : "speech.webm");
+    const said = ((await api("/api/transcribe", {method: "POST", body: form})).text || "").trim();
+    if (!said) return micHint("Didn't catch that. Try again.", 4000);
+    const q = $("#q");
+    q.value = q.value.trim() ? q.value.replace(/\s*$/, " ") + said : said;
+    autosize();
+    q.focus();
+    q.setSelectionRange(q.value.length, q.value.length);
+    micHint("");
+  } catch (e) {
+    micHint(/not configured/.test(e.message) ? "Voice input isn't set up on this Dockt yet."
+                                             : "Couldn't transcribe that. Try again.", 5000);
+  } finally { setMic("idle"); }
+}
+$("#mic").onclick = () => rec ? stopMic() : startMic();
+document.addEventListener("keydown", e => { if (e.key === "Escape" && rec) stopMic(true); });
 
 // ---------- chat (POST /api/chat, streamed) ----------
 let messages = [];   // the whole conversation; role/content go to /api/chat every turn, the rest is for re-rendering
