@@ -43,6 +43,7 @@ from memory import IMG_DIR, store
 
 TOKEN = os.environ.get("DOCKT_TOKEN", "")
 STATIC = Path(__file__).parent / "static"
+CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
 
 
 @asynccontextmanager
@@ -96,6 +97,24 @@ async def agent_ping(p: Ping, x_dockt_token: str = Header("")):
 @app.get("/api/stats")
 async def stats():
     return store.stats()
+
+
+class CaptureControl(BaseModel):
+    paused: bool
+
+
+@app.get("/api/capture-control")
+async def capture_control_status():
+    return {"paused": CAPTURE_PAUSE_FILE.exists()}
+
+
+@app.post("/api/capture-control")
+async def set_capture_control(control: CaptureControl):
+    if control.paused:
+        CAPTURE_PAUSE_FILE.touch(exist_ok=True)
+    else:
+        CAPTURE_PAUSE_FILE.unlink(missing_ok=True)
+    return {"paused": CAPTURE_PAUSE_FILE.exists()}
 
 
 @app.get("/api/health")
