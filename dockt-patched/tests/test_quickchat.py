@@ -383,18 +383,22 @@ class QuickChatTests(unittest.TestCase):
         app.entry = Mock()
         app.entry._textbox = Mock()
         app.entry._textbox.count.return_value = (8,)
-        app._resize_composer()
+        app.entry.cget.return_value = 44
+        app.chat = Mock()
+        app.chat.winfo_height.return_value = 700   # tall enough that the 128 px cap applies
+        with patch.object(quickchat.ctk.ScalingTracker, "get_window_scaling", return_value=1.0):
+            app._resize_composer()
         app.entry.configure.assert_called_once_with(height=128)
 
     def test_paste_or_other_programmatic_edits_resize_the_composer(self):
         app = quickchat.QuickChat.__new__(quickchat.QuickChat)
         app.entry = Mock()
         app.entry.edit_modified.return_value = True
-        app._resize_composer = Mock()
+        app._schedule_composer_resize = Mock()
         app._composer_modified()
         app.entry.edit_modified.assert_any_call(False)
         self.assertEqual(app.entry.edit_modified.call_count, 2)
-        app._resize_composer.assert_called_once_with()
+        app._schedule_composer_resize.assert_called_once_with()
 
     def test_windows_focus_raises_top_level_and_focuses_input_child(self):
         calls: list[tuple] = []
