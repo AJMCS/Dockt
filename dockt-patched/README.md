@@ -22,6 +22,24 @@ Run the regression and local API smoke tests from this folder with:
 node --test tests/test_dashboard_history.cjs
 ```
 
+## Voice input and spoken replies (Windows)
+
+Hover over the desktop pet to see three buttons: quick chat, mic dictation, and
+voice conversation (headphones). For dictation, click the mic, speak, then click
+again; the words appear in the chat box for editing before you send them.
+
+For a spoken reply, click the headphones, speak your question, then click again
+to stop and ask. Dockt continues the current quick-chat conversation and reads
+the answer using Windows' built-in local voice. Click the headphones while it is
+thinking or speaking to cancel voice mode, or press Esc in the quick-chat window.
+The answer remains available as text with its source links.
+
+The dashboard's mic also provides editable dictation. Whisper runs on this
+laptop's CPU by default; the launcher starts it even when the Dockt service is
+already running. The first launch downloads the speech model weights once, so
+allow extra time for setup. Audio transcription and speech playback run locally.
+An explicit `STT_URL` can point to another local speech server instead.
+
 ## The GX10 (models only)
 
 The GX10 runs Ollama with three models kept loaded:
@@ -130,4 +148,4 @@ The full shapes are in [`TEAM.md`](TEAM.md) §3.1. Everything is on `http://127.
 | `GET /api/search`, `/api/browse`, `/api/timeline`, `/api/capture/{id}`, `/img/{id}` | memory |
 | `GET /api/stats`, `/api/health` | counters; can this laptop reach the GX10 models |
 | `POST /ingest`, `/agent/ping` | capture agent |
-| `POST /api/transcribe` | speech-to-text via the GX10 (not used by the app yet) |
+| `POST /api/transcribe` | local speech-to-text for dashboard dictation and the desktop pet |

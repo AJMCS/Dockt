@@ -628,31 +628,48 @@ function watchSpeech(stream, onVerdict) {
   } catch { stop(); }
   return stop;
 }
+let micState = "idle", micGeneration = 0;
 function micHint(text, ms) {   // the placeholder doubles as the status line; it shows while the box is empty
   clearTimeout(micHint.timer);
   $("#q").placeholder = text || PLACEHOLDER;
   if (text && ms) micHint.timer = setTimeout(() => { $("#q").placeholder = PLACEHOLDER; }, ms);
 }
 function setMic(state) {   // "idle" | "recording" | "working"
+  micState = state;
   const b = $("#mic"), on = state === "recording";
   b.classList.toggle("recording", on);
-  b.disabled = state === "working";
+  b.disabled = state === "working" || state === "starting";
   b.setAttribute("aria-pressed", String(on));
   b.setAttribute("aria-label", on ? "Stop recording" : "Start voice input");
   b.title = on ? "Stop and transcribe (Esc cancels)" : "Voice input";
 }
 async function startMic() {
+  if (micState !== "idle") return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined")
     return micHint("Voice input isn't available in this window.", 4000);
+  const generation = ++micGeneration;
+  setMic("starting");
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
-  catch { return micHint("Microphone blocked. Allow mic access for Dockt, then try again.", 5000); }
-  const recorder = new MediaRecorder(stream);
-  const r = rec = {recorder, stream, chunks: [], cancelled: false};
+  catch {
+    if (generation !== micGeneration) return;
+    setMic("idle");
+    return micHint("Microphone blocked. Allow mic access for Dockt, then try again.", 5000);
+  }
+  if (generation !== micGeneration) { stream.getTracks().forEach(t => t.stop()); return; }
+  let recorder;
+  try { recorder = new MediaRecorder(stream); }
+  catch {
+    stream.getTracks().forEach(t => t.stop()); setMic("idle");
+    return micHint("Couldn't start recording. Try again.", 4000);
+  }
+  const r = rec = {recorder, stream, chunks: [], cancelled: false, generation};
   recorder.ondataavailable = e => { if (e.data && e.data.size) r.chunks.push(e.data); };
   recorder.onstop = () => finishMic(r);
   r.timer = setTimeout(stopMic, MIC_LIMIT_MS);
-  recorder.start();
+  try { recorder.start(); }
+  catch { cancelMic(); return micHint("Couldn't start recording. Try again.", 4000); }
+  recorder.onerror = () => { cancelMic(); micHint("Recording stopped. Try again.", 4000); };
   r.stopMeter = watchSpeech(stream, verdict => {
     if (rec !== r) return;
     if (verdict === "silent") r.hint = "Didn't hear anything. Try again.";
@@ -660,6 +677,17 @@ async function startMic() {
   });
   setMic("recording");
   micHint("Listening… stops when you're done, or click the mic.");
+}
+function cancelMic() {
+  ++micGeneration;
+  if (rec) {
+    rec.cancelled = true;
+    clearTimeout(rec.timer);
+    rec.stream.getTracks().forEach(t => t.stop());
+    if (rec.recorder.state !== "inactive") rec.recorder.stop();
+    rec = null;
+  }
+  setMic("idle"); micHint("");
 }
 function stopMic(cancel = false) {
   if (!rec) return;
@@ -690,6 +718,7 @@ async function toWav16k(blob) {
 async function finishMic(r) {
   r.stream.getTracks().forEach(t => t.stop());   // turn the mic (and the OS mic indicator) off
   if (rec === r) rec = null;
+  if (r.generation !== micGeneration) return;
   if (r.cancelled || !r.chunks.length) { setMic("idle"); micHint(r.hint || "", r.hint ? 4000 : 0); return; }
   setMic("working");
   micHint("Transcribing…");
@@ -699,6 +728,7 @@ async function finishMic(r) {
     const form = new FormData();
     form.append("audio", audio, audio.type === "audio/wav" ? "speech.wav" : "speech.webm");
     const said = ((await api("/api/transcribe", {method: "POST", body: form})).text || "").trim();
+    if (r.generation !== micGeneration) return;
     if (!said) return micHint("Didn't catch that. Try again.", 4000);
     const q = $("#q");
     q.value = q.value.trim() ? q.value.replace(/\s*$/, " ") + said : said;
@@ -707,12 +737,14 @@ async function finishMic(r) {
     q.setSelectionRange(q.value.length, q.value.length);
     micHint("");
   } catch (e) {
+    if (r.generation !== micGeneration) return;
     micHint(/not configured/.test(e.message) ? "Voice input isn't set up on this Dockt yet."
                                              : "Couldn't transcribe that. Try again.", 5000);
-  } finally { setMic("idle"); }
+  } finally { if (r.generation === micGeneration) setMic("idle"); }
 }
 $("#mic").onclick = () => rec ? stopMic() : startMic();
-document.addEventListener("keydown", e => { if (e.key === "Escape" && rec) stopMic(true); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && micState !== "idle") cancelMic(); });
+window.addEventListener("pagehide", cancelMic);
 
 // ---------- chat (POST /api/chat, streamed) ----------
 let messages = [];   // the whole conversation; role/content go to /api/chat every turn, the rest is for re-rendering
@@ -842,6 +874,7 @@ async function sendChat(q) {
 
 function newChat() {
   if (busy) return;
+  cancelMic();
   messages = []; chatId = null; chatTs = 0;
   $("#thread").innerHTML = WELCOME;
   showSources([]); clearTimelineSlot(); renderChatList(); closeSidebar();
@@ -1011,6 +1044,7 @@ $("#chatList").addEventListener("click", async e => {
     return id === chatId ? newChat() : renderChatList();
   }
   const c = loadChats().find(c => c.id === id); if (!c) return;
+  cancelMic();
   chatId = id; chatTs = c.ts; messages = c.messages;
   renderConversation(); renderChatList(); closeSidebar();
   $("#q").focus();

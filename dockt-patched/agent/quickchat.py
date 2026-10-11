@@ -295,6 +295,59 @@ class VoiceError(Exception):
         self.short = short
 
 
+class LocalSpeech:
+    """Windows SAPI in a hidden child process; text is input data, never shell code."""
+    COMMAND = "$ErrorActionPreference='Stop'; [Console]::InputEncoding=[Text.Encoding]::UTF8; $text=[Console]::In.ReadToEnd(); $voice=New-Object -ComObject SAPI.SpVoice; $null=$voice.Speak($text)"
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.generation = 0
+        self.process = None
+
+    def cancel(self):
+        with self.lock:
+            self.generation += 1
+            if self.process is not None and self.process.poll() is None:
+                self.process.terminate()
+            self.process = None
+
+    def speak(self, text, done):
+        self.cancel()
+        text = CITATION.sub("", text)
+        text = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", text)
+        text = re.sub(r"[*_`#]", "", text).strip()
+        with self.lock:
+            generation = self.generation
+
+        def work():
+            process = None
+            error = None
+            try:
+                with self.lock:
+                    if generation != self.generation:
+                        return
+                    process = self.process = subprocess.Popen(
+                        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", self.COMMAND],
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                process.communicate(text, timeout=120)
+                if process.returncode:
+                    error = "Couldn't play the spoken reply."
+            except Exception:
+                error = "Couldn't play the spoken reply."
+                if process is not None and process.poll() is None:
+                    process.terminate()
+            finally:
+                with self.lock:
+                    current = generation == self.generation
+                    if current:
+                        self.process = None
+                if current:
+                    done(error)
+
+        threading.Thread(target=work, name="dockt-speech", daemon=True).start()
+
+
 class MicRecorder:
     """Records the default microphone with Windows' built-in MCI audio API, so voice input needs no extra
     package. Records 16 kHz mono 16-bit WAV, the format Whisper servers expect."""
@@ -1339,6 +1392,10 @@ class QuickChat:
         self.pet_hover_button = None
         self._hint_hide_job = None
         self.voice_state = "idle"   # idle -> recording -> transcribing -> idle
+        self.voice_conversation = False
+        self.voice_generation = 0
+        self.voice_question = None
+        self.speech = LocalSpeech()
         self.recorder = None
         self.pet_notice = ""
         self._notice_job = self._voice_limit_job = None
@@ -1438,13 +1495,14 @@ class QuickChat:
             return False
 
     def _draw_pet_controls(self, canvas):
-        self._rounded_rect(canvas, 43, 110, 117, 138, 12, fill="#252824",
+        self._rounded_rect(canvas, 27, 110, 133, 138, 12, fill="#252824",
                            outline="#454A43", width=1, tags=("pet-control-bar",))
         voice = getattr(self, "voice_state", "idle")
-        for name, center in (("chat", 64), ("mic", 96)):
+        for name, center in (("chat", 48), ("mic", 80), ("talk", 112)):
             active = self.pet_hover_button == name
             fill = "#555A53" if active else "#252824"
-            if name == "mic" and voice == "recording":
+            if ((name == "mic" and not self.voice_conversation) or
+                    (name == "talk" and self.voice_conversation)) and voice != "idle":
                 fill = "#EF4444" if active else "#DC2626"
             outline = fill
             self._rounded_rect(
@@ -1458,7 +1516,18 @@ class QuickChat:
                 canvas.create_line(center - 2, 127, center - 3, 130, center + 1, 127,
                                    fill="#F1F3EE", width=1.5,
                                    tags=("pet-control", f"pet-control-{name}"))
-            elif voice == "recording":   # stop square
+            elif name == "talk":
+                tags = ("pet-control", "pet-control-talk")
+                if self.voice_conversation:
+                    canvas.create_rectangle(center - 4, 120, center + 4, 128,
+                                            fill="#FFFFFF", outline="", tags=tags)
+                else:
+                    canvas.create_arc(center - 7, 117, center + 7, 132, start=0, extent=180,
+                                      style="arc", outline="#F1F3EE", width=1.5, tags=tags)
+                    for offset in (-6, 6):
+                        canvas.create_line(center + offset, 124, center + offset, 130,
+                                           fill="#F1F3EE", width=3, tags=tags)
+            elif voice == "recording" and not self.voice_conversation:   # stop square
                 canvas.create_rectangle(center - 4, 120, center + 4, 128, fill="#FFFFFF", outline="",
                                         tags=("pet-control", f"pet-control-{name}"))
             else:                        # microphone, dimmed while transcribing
@@ -1471,9 +1540,14 @@ class QuickChat:
                 canvas.create_line(center, 130, center, 133, fill=ink, width=1.5, tags=tags)
 
             notice = getattr(self, "pet_notice", "")
-            if active or (name == "mic" and notice):
+            notice_button = "talk" if self.voice_conversation else "mic"
+            if active or (name == notice_button and notice and not self.pet_hover_button):
                 if name == "chat":
                     title = "Open quick chat"
+                elif name == "talk":
+                    title = ("Stop and ask" if voice == "recording" else "Stop voice chat") if self.voice_conversation else "Voice conversation"
+                    if notice and not active:
+                        title = notice
                 elif active and voice in ("idle", "recording"):   # hovering says what a click does
                     title = "Stop and transcribe" if voice == "recording" else "Ask by voice"
                 else:
@@ -1489,10 +1563,12 @@ class QuickChat:
 
     def _pet_button_at(self, x, y):
         x, y = x / self.ui_scale, y / self.ui_scale
-        if 52 <= x <= 76 and 112 <= y <= 136:
+        if 36 <= x <= 60 and 112 <= y <= 136:
             return "chat"
-        if 84 <= x <= 108 and 112 <= y <= 136:
+        if 68 <= x <= 92 and 112 <= y <= 136:
             return "mic"
+        if 100 <= x <= 124 and 112 <= y <= 136:
+            return "talk"
         return None
 
     def _pet_motion(self, event):
@@ -1568,6 +1644,8 @@ class QuickChat:
             self.show()
         elif button == "mic":
             self._toggle_voice()   # the options menu is on right-click
+        elif button == "talk":
+            self._toggle_conversation()
 
     def _pet_say(self, text: str, ms: int | None = None):
         """A short status under the pet (where tooltips go): "Listening…", "Voice isn't set up"…"""
@@ -1580,10 +1658,43 @@ class QuickChat:
         self._pet_hint(bool(text) or self.pet_hover_button is not None)
 
     def _toggle_voice(self):
+        if self.voice_conversation:
+            self._pet_say("Use voice chat stop", 3000)
+            return
         if self.voice_state == "idle":
             self._start_voice()
         elif self.voice_state == "recording":
             self._stop_voice()
+
+    def _cancel_conversation(self):
+        self.voice_generation += 1
+        self.voice_conversation = False
+        self.voice_question = None
+        self.speech.cancel()
+        if self._voice_limit_job is not None:
+            self.root.after_cancel(self._voice_limit_job)
+            self._voice_limit_job = None
+        if self.recorder is not None:
+            self.recorder.cancel()
+            self.recorder = None
+        self.voice_state = "idle"
+        self._pet_say("")
+
+    def _toggle_conversation(self):
+        if self.voice_conversation:
+            if self.voice_state == "recording":
+                self._stop_voice()
+            else:
+                self._cancel_conversation()
+            return
+        if self.busy or self.voice_state != "idle":
+            self._pet_say("Finish current request", 3000)
+            return
+        self.voice_conversation = True
+        self.voice_generation += 1
+        self._start_voice()
+        if self.voice_state != "recording":
+            self.voice_conversation = False
 
     def _start_voice(self):
         if os.name != "nt":
@@ -1637,17 +1748,19 @@ class QuickChat:
             wav = recorder.stop()
         except OSError as exc:
             self.voice_state = "idle"
+            self.voice_conversation = False
             self.status.set(f"Couldn't save the recording ({exc}).")
             self._pet_say("Mic not available", 4000)
             return
         self.voice_state = "transcribing"
         self._pet_say("Transcribing…")
+        generation = self.voice_generation
 
         def work():
             try:
-                self.events.put(("voice-text", transcribe_audio(wav)))
+                self.events.put(("voice-text", (generation, transcribe_audio(wav))))
             except VoiceError as exc:
-                self.events.put(("voice-error", exc))
+                self.events.put(("voice-error", (generation, exc)))
 
         threading.Thread(target=work, name="dockt-voice", daemon=True).start()
 
@@ -1655,11 +1768,24 @@ class QuickChat:
         """Put the words in the quick chat's box (not sent, so a misheard word can be fixed) and open it."""
         self.voice_state = "idle"
         if not text:
+            self.voice_conversation = False
             self._pet_say("Didn't catch that", 3000)
             return
         self._pet_say("")
         self.show()
         self._clear_composer_placeholder()
+        if self.voice_conversation:
+            draft = self.entry.get("1.0", "end-1c")
+            self.entry.delete("1.0", "end")
+            self.entry.insert("1.0", text)
+            self.voice_question = text
+            self.voice_state = "thinking"
+            self._pet_say("Thinking…")
+            self.submit()
+            if draft:
+                self.entry.insert("1.0", draft)
+                self._resize_composer()
+            return
         current = self.entry.get("1.0", "end-1c")
         self.entry.insert("end", (" " if current.strip() and not current.endswith(" ") else "") + text)
         self._resize_composer()
@@ -1829,7 +1955,7 @@ class QuickChat:
             y_px = pet_y + pet_height + gap
         x_px = min(max(8, x_px), max(8, screen_width - round(width * scale) - 8))
         y_px = min(max(8, y_px), max(8, screen_height - round(height * scale) - 8))
-        x = round(x_px / scale)
+        x = int(x_px / scale)   # floor so fractional DPI scaling never overshoots the pet's right edge
         y = round(y_px / scale)
         self.chat.geometry(f"{width}x{height}+{x}+{y}")
         self.chat.deiconify()
@@ -1935,9 +2061,13 @@ class QuickChat:
             self._resize_composer()
 
     def hide(self):
+        if getattr(self, "voice_conversation", False):
+            self._cancel_conversation()
         self.chat.withdraw()
 
     def submit(self, _event=None):
+        if getattr(self, "voice_conversation", False) and self.voice_state != "thinking":
+            return "break"
         if self.placeholder_visible:
             return "break"
         question = self.entry.get("1.0", "end-1c").strip()
@@ -2041,11 +2171,24 @@ class QuickChat:
                 if kind == "toggle":
                     self.toggle()
                 elif kind == "voice-text":
-                    self._voice_done(value)
+                    generation, text = value
+                    if generation == self.voice_generation:
+                        self._voice_done(text)
                 elif kind == "voice-error":
+                    generation, error = value
+                    if generation != self.voice_generation:
+                        continue
                     self.voice_state = "idle"
-                    self.status.set(str(value))
-                    self._pet_say(value.short, 4000)
+                    self.voice_conversation = False
+                    self.status.set(str(error))
+                    self._pet_say(error.short, 4000)
+                elif kind == "speech-done":
+                    generation, error = value
+                    if generation == self.voice_generation:
+                        self.voice_state = "idle"
+                        self.voice_conversation = False
+                        self.voice_question = None
+                        self._pet_say(error or "", 4000 if error else None)
                 elif kind == "pet-status":
                     self.pet_status = value
                     mood = self._pet_mood()
@@ -2056,6 +2199,8 @@ class QuickChat:
                     self.status.set(value)
                     self.show()
                 elif kind == "error":
+                    if getattr(self, "voice_conversation", False):
+                        self._cancel_conversation()
                     self.busy = False
                     self.ask_button.configure(state="normal")
                     self.retry_button.configure(state="normal")
@@ -2093,11 +2238,19 @@ class QuickChat:
                     self.status.set("Answered · Esc hides this window")
                     self._render(self.messages)
                     self._clear_thumbnails()
+                    if getattr(self, "voice_conversation", False) and question == self.voice_question:
+                        self.voice_state = "speaking"
+                        self._pet_say("Speaking…")
+                        generation = self.voice_generation
+                        self.speech.speak(answer, lambda error, gen=generation:
+                                          self.events.put(("speech-done", (gen, error))))
         except queue.Empty:
             pass
         self.root.after(80, self._drain_events)
 
     def close(self):
+        if getattr(self, "speech", None) is not None:
+            self.speech.cancel()
         if getattr(self, "recorder", None) is not None:
             self.recorder.cancel()   # release the microphone
         if getattr(self, "_status_stop", None) is not None:

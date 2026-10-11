@@ -152,6 +152,7 @@ class QuickChatWidgetTests(unittest.TestCase):
         control_bounds = app.pet_canvas.bbox("pet-control-bar")
         self.assertGreater(control_bounds[1], 100)
         self.assertLessEqual(control_bounds[3], 140)
+        self.assertTrue(app.pet_canvas.find_withtag("pet-control-talk"))
 
         app._schedule_pet_hint_hide()
         pending_hide = app._hint_hide_job
@@ -165,23 +166,28 @@ class QuickChatWidgetTests(unittest.TestCase):
             root.update()
             show.assert_not_called()
 
-            app.pet_canvas.event_generate("<ButtonPress-1>", x=64, y=124)
-            app.pet_canvas.event_generate("<ButtonRelease-1>", x=64, y=124)
+            app.pet_canvas.event_generate("<ButtonPress-1>", x=48, y=124)
+            app.pet_canvas.event_generate("<ButtonRelease-1>", x=48, y=124)
             root.update()
             show.assert_called_once_with()
 
         with patch.object(app, "_toggle_voice") as voice, patch.object(app, "_show_options_at") as show_options:
-            app.pet_canvas.event_generate("<ButtonPress-1>", x=96, y=124)
-            app.pet_canvas.event_generate("<ButtonRelease-1>", x=96, y=124)
+            app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=124)
+            app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=124)
             root.update()
             voice.assert_called_once_with()
             show_options.assert_not_called()
+            with patch.object(app, "_toggle_conversation") as talk:
+                app.pet_canvas.event_generate("<ButtonPress-1>", x=112, y=124)
+                app.pet_canvas.event_generate("<ButtonRelease-1>", x=112, y=124)
+                root.update()
+                talk.assert_called_once_with()
             app.pet_canvas.event_generate("<Button-3>", x=80, y=70)   # options are on right-click
             root.update()
             show_options.assert_called_once()
         app._pet_hint(True)   # opening the menu hides the controls; hovering the pet again brings them back
 
-        app.pet_canvas.event_generate("<Motion>", x=64, y=124)
+        app.pet_canvas.event_generate("<Motion>", x=48, y=124)
         root.update()
         titles = [app.pet_canvas.itemcget(item, "text")
                   for item in app.pet_canvas.find_withtag("pet-tooltip")
@@ -255,8 +261,8 @@ class QuickChatWidgetTests(unittest.TestCase):
         with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
             app._pet_hint(True)
             for _ in range(2):   # click the mic to start, click again to stop
-                app.pet_canvas.event_generate("<ButtonPress-1>", x=96, y=124)
-                app.pet_canvas.event_generate("<ButtonRelease-1>", x=96, y=124)
+                app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=124)
+                app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=124)
                 root.update()
                 if app.voice_state == "recording":
                     recorder.start.assert_called_once_with()
@@ -274,6 +280,49 @@ class QuickChatWidgetTests(unittest.TestCase):
         self.assertEqual(app.entry.get("1.0", "end-1c"), "where is dinner tonight")
         self.assertFalse(app.placeholder_visible)
         self.assertEqual(app.messages, [], "voice fills the box; Enter sends it")
+
+    def test_voice_conversation_sends_then_reads_reply(self):
+        root, app = self.make_app(96/72)
+        app._clear_composer_placeholder()
+        app.entry.insert("1.0", "Keep this unsent draft")
+        recorder = Mock()
+        recorder.stop.return_value = b"RIFF-wav"
+        result = {"answer": "Dinner is at seven. [#3]", "sources": [], "cited": [], "ms": 1}
+        with patch.object(quickchat, "MicRecorder", return_value=recorder), \
+                patch.object(quickchat, "transcribe_audio", return_value="When is dinner?"), \
+                patch.object(quickchat, "chat_request", return_value=result) as chat, \
+                patch.object(app.speech, "speak") as speak:
+            app._toggle_conversation()
+            self.assertTrue(app.voice_conversation)
+            app._toggle_conversation()
+            for _ in range(100):
+                root.update()
+                if speak.called:
+                    break
+                time.sleep(0.02)
+            self.assertTrue(speak.called)
+            self.assertEqual(chat.call_args.args[0][-1]["content"], "When is dinner?")
+            self.assertEqual(speak.call_args.args[0], result["answer"])
+            self.assertEqual(app.voice_state, "speaking")
+            self.assertEqual(app.entry.get("1.0", "end-1c"), "Keep this unsent draft")
+            speak.call_args.args[1](None)
+            app._drain_events()
+            self.assertFalse(app.voice_conversation)
+            self.assertEqual(app.voice_state, "idle")
+
+    def test_cancel_voice_ignores_late_transcript_and_stops_speech(self):
+        root, app = self.make_app(96/72)
+        with patch.object(app.speech, "cancel") as stop:
+            app.voice_conversation = True
+            app.voice_state = "transcribing"
+            generation = app.voice_generation
+            app._toggle_conversation()
+            stop.assert_called_once_with()
+            app.events.put(("voice-text", (generation, "An old question")))
+            app._drain_events()
+            self.assertTrue(app.placeholder_visible)
+            self.assertEqual(app.messages, [])
+            self.assertFalse(app.voice_conversation)
 
     def test_pet_mic_failure_shows_a_short_notice(self):
         root, app = self.make_app(96/72)

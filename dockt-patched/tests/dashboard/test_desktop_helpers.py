@@ -118,3 +118,13 @@ def test_whisper_is_not_started_when_not_needed(whisper_launch, monkeypatch, rea
 def test_mock_mode_sends_voice_input_to_the_mock(monkeypatch):
     monkeypatch.delenv("STT_URL", raising=False)
     assert d.model_env(mock=True)["STT_URL"] == "http://127.0.0.1:9000/v1"
+
+
+def test_reusing_service_still_starts_missing_whisper(monkeypatch):
+    calls = []
+    monkeypatch.setattr(d, "model_env", lambda mock: {})
+    monkeypatch.setattr(d, "tunnel_target", lambda *args: "")
+    monkeypatch.setattr(d, "answers", lambda url: True)
+    monkeypatch.setattr(d, "start_whisper", lambda mock, env: calls.append((mock, env)))
+    assert d.start_backend(mock=False, capture=False) is None
+    assert calls == [(False, {})]
