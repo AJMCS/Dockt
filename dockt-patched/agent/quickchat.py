@@ -252,7 +252,7 @@ class QuickChat:
         self.chat = ctk.CTkToplevel(self.root, fg_color=self.colors["bg"])
         self.chat.title("Dockt Quick Chat")
         self.chat.geometry("720x600")
-        self.chat.minsize(480, 360)
+        self.chat.minsize(360, 280)
         self.chat.attributes("-topmost", True)
         self.chat.withdraw()
         self.chat.protocol("WM_DELETE_WINDOW", self.hide)
@@ -269,6 +269,7 @@ class QuickChat:
         self._composer_resize_job = None
         self._style()
         self._build()
+        self.chat.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._create_pet()
         self.root.after(80, self._drain_events)
         self.root.after(1000, self._poll_shared_history)
@@ -317,15 +318,15 @@ class QuickChat:
 
     def _build(self):
         frame = ctk.CTkFrame(self.chat, fg_color=self.colors["bg"], corner_radius=20)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        frame.pack(fill="both", expand=True, padx=6, pady=6)
         content = ctk.CTkFrame(frame, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=16, pady=14)
+        content.pack(fill="both", expand=True, padx=10, pady=8)
         frame = content
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
-        header = ctk.CTkFrame(frame, fg_color="transparent")
+        header = ctk.CTkFrame(frame, fg_color="transparent", height=32)
         header.grid(row=0, column=0, sticky="ew")
-        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand = ctk.CTkFrame(header, fg_color="transparent", height=1)
         brand.pack(side="left")
         ctk.CTkLabel(brand, text="Dockt", text_color=self.colors["text"],
                      font=("Segoe UI", 19, "bold")).pack(side="left")
@@ -338,7 +339,8 @@ class QuickChat:
                      font=("Segoe UI", 10)).pack(
             side="right", pady=(7, 0))
 
-        transcript_card = ctk.CTkFrame(frame, fg_color=self.colors["surface"], corner_radius=16)
+        transcript_card = ctk.CTkFrame(
+            frame, fg_color=self.colors["surface"], corner_radius=16, height=1)
         transcript_card.grid(row=1, column=0, sticky="nsew", pady=(12, 8))
         self.transcript = tk.Text(transcript_card, wrap="word", height=1, state="disabled",
                                   bg=self.colors["surface"], fg=self.colors["text"],
@@ -366,10 +368,10 @@ class QuickChat:
                                       rmargin=28, spacing1=2, spacing3=10)
         self.transcript.tag_configure("error", foreground=self.colors["error"])
 
-        self.thumbnail_row = ctk.CTkFrame(frame, fg_color="transparent")
+        self.thumbnail_row = ctk.CTkFrame(frame, fg_color="transparent", height=1)
         self.thumbnail_row.grid(row=2, column=0, sticky="ew", pady=(0, 7))
 
-        composer = ctk.CTkFrame(frame, fg_color="transparent")
+        composer = ctk.CTkFrame(frame, fg_color="transparent", height=1)
         composer.grid(row=3, column=0, sticky="ew")
         composer.columnconfigure(0, weight=1)
         self.entry = ctk.CTkTextbox(composer, height=44, wrap="word", activate_scrollbars=False,
@@ -402,18 +404,61 @@ class QuickChat:
         self.retry_button.grid(row=0, column=2, padx=(6, 0), sticky="s")
         self.retry_button.grid_remove()
 
-        footer = ctk.CTkFrame(frame, fg_color="transparent")
+        footer = ctk.CTkFrame(frame, fg_color="transparent", height=1)
         footer.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        footer.columnconfigure(0, weight=1)
         self.status = tk.StringVar(value="Ask about something you saw on this computer.")
-        ctk.CTkLabel(footer, textvariable=self.status, text_color=self.colors["muted"],
-                     font=("Segoe UI", 10), wraplength=210, justify="left",
-                     anchor="w").pack(side="left", fill="x", expand=True)
-        for label, command in (("Hide", self.hide), ("Open dashboard", self.open_in_dockt),
-                               ("Quit", self.close)):
-            ctk.CTkButton(footer, text=label, command=command, width=96, height=32,
-                          corner_radius=11, fg_color=self.colors["surface2"],
-                          hover_color=self.colors["line"], text_color=self.colors["text"],
-                          font=("Segoe UI", 10)).pack(side="right", padx=(6, 0))
+        self.status_label = ctk.CTkLabel(
+            footer, textvariable=self.status, text_color=self.colors["muted"],
+            font=("Segoe UI", 10), wraplength=210, justify="left", anchor="w")
+        self.footer_buttons = []
+        for column, (label, command) in enumerate(
+                (("Hide", self.hide), ("Open dashboard", self.open_in_dockt),
+                 ("Quit", self.close)), start=1):
+            button = ctk.CTkButton(
+                footer, text=label, command=command, width=96, height=32,
+                corner_radius=11, fg_color=self.colors["surface2"],
+                hover_color=self.colors["line"], text_color=self.colors["text"],
+                font=("Segoe UI", 10))
+            button.grid(row=0, column=column, padx=(6, 0), sticky="e")
+            self.footer_buttons.append(button)
+        self.footer = footer
+        self._layout_footer()
+
+    def _schedule_responsive_layout(self, event=None):
+        if event is not None and event.widget is not self.chat:
+            return
+        if getattr(self, "_responsive_layout_job", None) is None:
+            self._responsive_layout_job = self.chat.after_idle(self._layout_footer)
+
+    def _layout_footer(self):
+        self._responsive_layout_job = None
+        if not hasattr(self, "footer"):
+            return
+        scale = ctk.ScalingTracker.get_window_scaling(self.chat)
+        width = self.chat.winfo_width() / max(1.0, scale)
+        compact = width < 620
+        narrow = width < 430
+        if compact:
+            self.status_label.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+            for column, button in enumerate(self.footer_buttons, start=1):
+                button.grid_configure(row=1, column=column,
+                                      padx=(0 if column == 1 else 6, 0))
+            self.footer.columnconfigure(1, weight=1, uniform="footer-actions")
+            self.footer.columnconfigure(2, weight=1, uniform="footer-actions")
+            self.footer.columnconfigure(3, weight=1, uniform="footer-actions")
+            for button, text in zip(self.footer_buttons,
+                                    ("Hide", "Dash" if narrow else "Dashboard", "Quit")):
+                button.configure(text=text, width=64 if narrow else 96)
+        else:
+            self.status_label.grid(row=0, column=0, sticky="ew", pady=0)
+            self.status_label.configure(wraplength=max(120, int(width - 390)))
+            for column, button in enumerate(self.footer_buttons, start=1):
+                button.grid_configure(row=0, column=column, padx=(6, 0))
+                button.configure(width=96)
+            for column in (1, 2, 3):
+                self.footer.columnconfigure(column, weight=0, uniform="")
+        self._resize_composer()
 
     def _create_pet(self):
         self.pet = tk.Toplevel(self.root)
@@ -717,7 +762,7 @@ class QuickChat:
         available_height = max(1, round((screen_height - 80) / scale))
         width = min(720, available_width)
         height = min(600, available_height)
-        self.chat.minsize(min(480, width), min(360, height))
+        self.chat.minsize(min(360, width), min(280, height))
         x = max(0, round((screen_width / scale - width) / 2))
         y = max(0, round((screen_height / scale - height) / 2))
         self.chat.geometry(f"{width}x{height}+{x}+{y}")
@@ -773,7 +818,10 @@ class QuickChat:
     def _resize_composer(self, _event=None):
         self._composer_resize_job = None
         lines = self.entry._textbox.count("1.0", "end-1c", "displaylines") or (1,)
-        desired_height = max(44, min(128, 34 * lines[0]))
+        scale = ctk.ScalingTracker.get_window_scaling(self.chat)
+        window_height = self.chat.winfo_height() / max(1.0, scale)
+        max_height = max(44, min(128, int(window_height - 260)))
+        desired_height = max(44, min(max_height, 34 * lines[0]))
         if int(self.entry.cget("height")) != desired_height:
             self.entry.configure(height=desired_height)
 
