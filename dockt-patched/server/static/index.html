@@ -615,11 +615,12 @@ class EndOfSpeech {
 }
 // Listen to the stream's level and report "done" / "silent" once. Returns a function that stops listening.
 // Without Web Audio (or on a stream it can't read) it does nothing, and the mic stops on click as before.
-function watchSpeech(stream, onVerdict) {
+function watchSpeech(stream, onVerdict, onLevel = () => {}) {
   let ctx, timer;
   const stop = () => { clearInterval(timer); if (ctx) ctx.close().catch(() => {}); };
   try {
     ctx = new AudioContext();
+    ctx.resume?.().catch(() => {});
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     ctx.createMediaStreamSource(stream).connect(analyser);
@@ -628,6 +629,7 @@ function watchSpeech(stream, onVerdict) {
       analyser.getFloatTimeDomainData(samples);
       let sum = 0;
       for (const v of samples) sum += v * v;
+      onLevel(samples);
       const verdict = eos.feed(Math.sqrt(sum / samples.length), 100);
       if (verdict) { stop(); onVerdict(verdict); }
     }, 100);
@@ -723,22 +725,6 @@ async function startMic(petSession = null) {
   const track = stream.getAudioTracks?.()[0] || stream.getTracks()[0];
   micInfo = {input: track.label || "System default mic", peak: 0, muted: !!track.muted};
   refreshMicInputs();
-  // Read the signal level locally so a silent/wrong input is visible immediately.
-  try {
-    r.levelContext = new AudioContext();
-    r.levelContext.resume().catch(() => {});
-    const source = r.levelContext.createMediaStreamSource(stream), analyser = r.levelContext.createAnalyser();
-    source.connect(analyser); analyser.fftSize = 512;
-    const samples = new Float32Array(analyser.fftSize);
-    r.levelTimer = setInterval(() => {
-      analyser.getFloatTimeDomainData(samples);
-      const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
-      micInfo.peak = Math.max(micInfo.peak, peak);
-      micInfo.muted = !!track.muted;
-      const label = `Listening on ${micInfo.input} · ${micInfo.muted ? "Microphone muted" : micInfo.peak > .001 ? "Audio detected" : "No input yet"}`;
-      if ($("#micStatus").textContent !== label) $("#micStatus").textContent = label;
-    }, 250);
-  } catch { if (r.levelContext) r.levelContext.close(); r.levelContext = null; }
   recorder.ondataavailable = e => { if (e.data && e.data.size) r.chunks.push(e.data); };
   recorder.onstop = () => finishMic(r);
   r.timer = setTimeout(stopMic, MIC_LIMIT_MS);
@@ -749,14 +735,17 @@ async function startMic(petSession = null) {
     if (rec !== r) return;
     if (verdict === "silent") r.hint = "Didn't hear anything. Try again.";
     stopMic(verdict === "silent");
+  }, samples => {
+    micInfo.peak = Math.max(micInfo.peak, ...samples.map(Math.abs));
+    micInfo.muted = !!track.muted;
+    $("#micStatus").textContent = `Listening on ${micInfo.input} · ${micInfo.muted ? "Microphone muted" : micInfo.peak > .001 ? "Audio detected" : "No input yet"}`;
   });
   setMic("recording");
   micHint("Listening… stops when you're done, or click the mic.");
 }
 function stopMicLevel(recording) {
-  clearInterval(recording.levelTimer);
-  recording.levelContext?.close().catch(() => {});
-  recording.levelContext = null;
+  recording.stopMeter?.();
+  recording.stopMeter = null;
 }
 function cancelMic() {
   if (["starting", "recording", "working"].includes(petVoiceState.state)) petVoiceState.state = "cancelled";
@@ -775,7 +764,8 @@ function stopMic(cancel = false) {
   if (!rec) return;
   rec.cancelled = cancel === true;
   clearTimeout(rec.timer);
-  rec.stopMeter && rec.stopMeter();
+  stopMicLevel(rec);
+  if (rec.petSession && petVoiceState.id === rec.petSession) petVoiceState.state = "working";
   if (rec.recorder.state !== "inactive") rec.recorder.stop();
 }
 // Whisper servers differ in which compressed formats they decode; 16 kHz mono WAV works everywhere.

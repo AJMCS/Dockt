@@ -26,7 +26,8 @@ node --test tests/test_dashboard_history.cjs
 
 Hover over the desktop pet to see three buttons: quick chat, a single microphone for
 voice, and more options (three dots). Click the mic, speak your question,
-then click again to stop and ask. Dockt continues the current quick-chat
+then pause for about 1.2 seconds to stop and ask automatically, or click again
+to stop manually. Eight seconds without speech cancels the recording. Dockt continues the current quick-chat
 conversation and reads the answer using Windows' built-in local voice. Click
 again while it is thinking or speaking to cancel, or press Esc in quick chat.
 The answer remains available as text with its source links. Any unsent typed
@@ -47,6 +48,10 @@ Choose the microphone from the dashboard composer's microphone dropdown. The
 selection is remembered and also applies to the pet. While recording, the status
 shows the active input and whether audio is detected; if it stays silent, choose
 another input instead of relying on the system default.
+
+Follow-up questions re-open previously cited captures from the local index so
+answers keep their screenshot links across dashboard and quick chat. Deleted
+captures and captures outside the selected device are not reused.
 
 ## The GX10 (models only)
 

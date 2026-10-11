@@ -139,6 +139,52 @@ class DashboardFlowTests(unittest.TestCase):
             self.assertEqual(resumed["messages"][1]["sources"][0]["id"], 42)
             self.assertEqual(resumed["messages"][2]["content"], "What time?")
 
+    def test_followup_reopens_verified_sources_for_both_clients(self):
+        first = self.client.post("/api/chat", json={"messages": [
+            {"role": "user", "content": "Who booked dinner?"}]}).json()
+        saved = self.client.get(f"/api/conversations/{first['conversation_id']}").json()
+        history = [{"role": m["role"], "content": m["content"]} for m in saved["messages"]]
+        async def answer_from_previous(messages, *args, **kwargs):
+            context = next((m["content"] for m in messages if m.get("tool_call_id") == "call_previous_captures"), "")
+            self.assertIn("Nopalito", context)
+            return {"content": "Dinner is at 8 PM [#42].", "tool_calls": []}
+        with patch.object(dockt_app.memory, "many", return_value=[self.capture]), \
+             patch.object(dockt_app.brain, "_chat_messages", side_effect=answer_from_previous), \
+             patch.object(quickchat, "urlopen", side_effect=self.popup_urlopen):
+            for stream in (False, True):
+                response = self.client.post("/api/chat", json={"messages": history + [
+                    {"role": "user", "content": "What time was it again?"}],
+                    "conversation_id": first["conversation_id"], "stream": stream})
+                self.assertEqual(response.status_code, 200)
+                resumed = quickchat.load_conversation(first["conversation_id"])
+                self.assertEqual(resumed["messages"][-1]["cited"], [42])
+                self.assertEqual(resumed["messages"][-1]["sources"][0]["id"], 42)
+
+    def test_model_missing_citations_is_asked_to_ground_the_answer(self):
+        async def respond(messages, tools=None, *args):
+            if "Revise that answer" in messages[-1]["content"]:
+                return {"content": "Dinner is at eight [#42].", "tool_calls": []}
+            if any(m["role"] == "tool" for m in messages):
+                return {"content": "Dinner is at eight.", "tool_calls": []}
+            return {"content": "", "tool_calls": [{"id": "search", "name": "search_screens", "arguments": {"q": "dinner"}}]}
+        with patch.object(dockt_app.brain, "_chat_messages", side_effect=respond):
+            response = self.client.post("/api/chat", json={"messages": [{"role": "user", "content": "When is dinner?"}]})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["cited"], [42])
+
+    def test_deleted_or_other_device_capture_is_not_reused(self):
+        async def answer(messages, *args, **kwargs):
+            self.assertFalse(any(m.get("tool_call_id") == "call_previous_captures" for m in messages))
+            return {"content": "I didn't see that on your screens.", "tool_calls": []}
+        with patch.object(dockt_app.memory, "many", return_value=[self.capture]), \
+             patch.object(dockt_app.memory, "search", new=AsyncMock(return_value=[])), \
+             patch.object(dockt_app.brain, "_chat_messages", side_effect=answer):
+            response = self.client.post("/api/chat", json={"device": "another-laptop", "messages": [
+                {"role": "assistant", "content": "Dinner [#42] [#999]."},
+                {"role": "user", "content": "Where again?"}]})
+            self.assertEqual(response.json()["cited"], [])
+            self.assertEqual(response.json()["sources"], [])
+
     def test_failed_model_reply_still_saves_the_user_message(self):
         from fastapi import HTTPException
         cid = str(uuid.uuid4())

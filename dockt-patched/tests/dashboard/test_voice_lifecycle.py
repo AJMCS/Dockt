@@ -98,3 +98,22 @@ def test_switching_chats_discards_pending_transcription(dash):
     dash.page.wait_for_timeout(100)
     assert dash.page.input_value("#q") == ""
     assert dash.js("micState") == "idle"
+
+
+def test_pet_auto_stop_transcribes_without_a_second_click(dash):
+    from test_dashboard import SPEAKING_MIC
+    dash.page.add_init_script(SPEAKING_MIC)
+    dash.open()
+    token = str(uuid.uuid4())
+    dash.page.fill("#q", "Keep draft")
+    dash.page.evaluate("id => petVoiceCommand('start', id)", token)
+    dash.page.wait_for_function("petVoiceState.state === 'recording'")
+    dash.page.wait_for_timeout(500)
+    dash.js("__mic.gain.value = 0.3")
+    dash.page.wait_for_timeout(900)
+    dash.js("__mic.gain.value = 0")
+    dash.page.wait_for_function("petVoiceState.state === 'done'", timeout=6000)
+    assert dash.js("petVoiceState.text") == "mock transcript"
+    assert dash.page.input_value("#q") == "Keep draft"
+    assert dash.js("__mic.uploads.length") == 1
+    assert dash.js("__mic.tracksStopped") >= 1

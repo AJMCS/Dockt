@@ -427,6 +427,19 @@ class MicRecorder:
             self.cancel()
             raise
 
+    def watch(self, callback):
+        """Notice browser auto-stop off the Tk thread; manual stop shares the same session."""
+        def work():
+            while self.active and not self.cancelled.wait(0.2):
+                try:
+                    state = self._command("status").get("state")
+                except OSError:
+                    state = "error"
+                if state in ("working", "done", "error", "cancelled"):
+                    callback()
+                    return
+        threading.Thread(target=work, name="dockt-voice-watch", daemon=True).start()
+
     def stop(self) -> str:
         self._command("stop")
         deadline = time.monotonic() + 120
@@ -1730,7 +1743,7 @@ class QuickChat:
             self._pet_say("Voice needs Windows", 3000)
             return
         try:
-            recorder = new_recorder()
+            recorder = MicRecorder()
             recorder.start()
         except (OSError, AttributeError) as exc:
             self.show()
@@ -1742,6 +1755,9 @@ class QuickChat:
         if hasattr(recorder, "levels"):   # it can hear: stop by itself when the speaker is done
             self._end_of_speech = EndOfSpeech()
             self.root.after(VOICE_TICK_MS, self._watch_voice, recorder)
+        if getattr(type(recorder), "watch", None):
+            generation = self.voice_generation
+            recorder.watch(lambda: self.events.put(("voice-auto-stop", (generation, recorder))))
         self._pet_say("Listening…")
 
     def _watch_voice(self, recorder):
@@ -2196,6 +2212,10 @@ class QuickChat:
                 kind, value = self.events.get_nowait()
                 if kind == "toggle":
                     self.toggle()
+                elif kind == "voice-auto-stop":
+                    generation, recorder = value
+                    if generation == self.voice_generation and self.recorder is recorder:
+                        self._stop_voice()
                 elif kind == "voice-text":
                     generation, text = value
                     if generation == self.voice_generation:

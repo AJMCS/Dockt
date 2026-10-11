@@ -309,6 +309,33 @@ class QuickChatWidgetTests(unittest.TestCase):
             self.assertFalse(app.voice_conversation)
             self.assertEqual(app.voice_state, "idle")
 
+    def test_browser_auto_stop_sends_question_then_speaks_once(self):
+        root, app = self.make_app(96/72)
+        app._clear_composer_placeholder()
+        app.entry.insert("1.0", "Keep my draft")
+        recorder = quickchat.MicRecorder()
+        def command(action):
+            return {"state": "recording"} if action == "start" else {"state": "done", "text": "When is dinner?"}
+        result = {"answer": "Dinner is at eight. [#42]", "sources": [], "cited": [42], "ms": 1}
+        with patch.object(recorder, "_command", side_effect=command), \
+             patch.object(quickchat, "MicRecorder", return_value=recorder), \
+             patch.object(quickchat, "chat_request", return_value=result) as chat, \
+             patch.object(quickchat, "load_thumbnail", return_value=None), \
+             patch.object(app.speech, "speak") as speak:
+            app._toggle_conversation()
+            for _ in range(100):
+                root.update()
+                if speak.called:
+                    break
+                time.sleep(.02)
+            chat.assert_called_once()
+            speak.assert_called_once()
+            self.assertEqual(app.voice_state, "speaking")
+            self.assertEqual(app.entry.get("1.0", "end-1c"), "Keep my draft")
+            speak.call_args.args[1](None)
+            app._drain_events()
+            self.assertEqual(app.voice_state, "idle")
+
     def test_cancel_voice_ignores_late_transcript_and_stops_speech(self):
         root, app = self.make_app(96/72)
         with patch.object(app.speech, "cancel") as stop:
@@ -346,7 +373,7 @@ class QuickChatWidgetTests(unittest.TestCase):
     def _record_with_levels(self, app, root, levels):
         """Start the pet mic on a fake recorder that hears `levels` (one per 100 ms), and run Tk until it's idle."""
         recorder = Mock()
-        recorder.stop.return_value = b"RIFF-wav"
+        recorder.stop.return_value = "where is dinner tonight"
         blocks = list(levels)
         recorder.levels.side_effect = lambda: [blocks.pop(0)] if blocks else []
         app._start_voice()
@@ -360,11 +387,11 @@ class QuickChatWidgetTests(unittest.TestCase):
     def test_pet_mic_stops_by_itself_when_the_speaker_is_done(self):
         root, app = self.make_app(96/72)
         app.hide()
-        with patch.object(quickchat, "new_recorder", side_effect=lambda: recorder_holder[0]),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight"),                 patch.object(quickchat, "VOICE_TICK_MS", 5), patch.object(app, "_focus_entry"):
+        with patch.object(quickchat, "MicRecorder", side_effect=lambda: recorder_holder[0]),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight"),                 patch.object(quickchat, "VOICE_TICK_MS", 5), patch.object(app, "_focus_entry"):
             speech = [0.001] * 4 + [0.08] * 12 + [0.001] * 20   # room, about a second of speech, then quiet
             recorder_holder = [None]
             recorder = Mock()
-            recorder.stop.return_value = b"RIFF-wav"
+            recorder.stop.return_value = "where is dinner tonight"
             recorder.levels.side_effect = lambda: [speech.pop(0)] if speech else []
             recorder_holder[0] = recorder
             app._start_voice()
@@ -381,7 +408,7 @@ class QuickChatWidgetTests(unittest.TestCase):
         root, app = self.make_app(96/72)
         recorder = Mock()
         recorder.levels.side_effect = lambda: [0.001]
-        with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "VOICE_TICK_MS", 1):
+        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "VOICE_TICK_MS", 1):
             app._start_voice()
             for _ in range(2000):
                 root.update()

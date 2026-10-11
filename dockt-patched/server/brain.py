@@ -367,6 +367,7 @@ async def ask(req: AskReq):
 class ChatMsg(BaseModel):
     role: str
     content: str
+    cited: list[int] = []
 
 
 class ChatReq(BaseModel):
@@ -599,6 +600,25 @@ async def _agent(req: ChatReq):
     msgs[-1]["content"] += _time_hint(history[-1].content)
 
     sources: dict[int, dict] = {}
+    # Re-read prior citations from storage; text history doesn't contain old tool results.
+    prior_ids = []
+    for message in reversed(req.messages[:-1]):
+        if message.role == "assistant":
+            ids = message.cited + [int(i) for i in re.findall(r"\[#(\d+)\]", message.content)]
+            prior_ids.extend(i for i in ids if i not in prior_ids)
+            if len(prior_ids) >= 12:
+                break
+    rows = [r for r in memory.many(prior_ids[:12]) if not req.device or r.get("device") == req.device]
+    if rows:
+        sources.update((r["id"], r) for r in rows)
+        followup = msgs.pop()
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [{
+            "id": "call_previous_captures", "type": "function", "function": {
+                "name": "get_captures", "arguments": json.dumps({"ids": list(sources)})}}]})
+        msgs.append({"role": "tool", "tool_call_id": "call_previous_captures",
+                     "content": "Previously cited screenshots (search again for new topics):\n" +
+                     "\n".join(_capture_line(r, 800) for r in rows)[:TOOL_MAX_CHARS]})
+        msgs.append(followup)
     drafted: list[int] = []  # captures a draft was built from; the model tends to drop their citations
     searched = False         # did the model ever actually search the screens?
     forced = False           # have we already forced one fallback search?
@@ -647,6 +667,17 @@ async def _agent(req: ChatReq):
     if drafted and not any(f"[#{i}]" in answer for i in drafted):
         answer += "\n\n" + " ".join(f"[#{i}]" for i in dict.fromkeys(drafted))
     answer, cited, items = _finish(answer, sources)
+    if sources and not cited and not _NEGATIVE.search(answer):
+        # Ask the model to ground a factual answer rather than silently losing source links.
+        msgs.append({"role": "assistant", "content": answer})
+        msgs.append({"role": "user", "content": "Revise that answer with [#id] citations for the facts supported by the tool results. Do not invent ids or unsupported facts."})
+        try:
+            async with _foreground():
+                grounded = await _chat_messages(msgs, None, CHAT_MAX_TOKENS, 0.1)
+            if (grounded.get("content") or "").strip():
+                answer, cited, items = _finish(grounded["content"].strip(), sources)
+        except Exception:
+            pass  # optional citation repair must not discard a successful answer
     # the model's answer arrives whole (tool rounds are non-stream); chunk it for the UI
     for piece in re.findall(r"\S+\s*", answer):
         yield {"type": "token", "text": piece}
@@ -665,13 +696,14 @@ async def chat(req: ChatReq):
     if not users:
         raise HTTPException(400, "no user message")
     ask_req = AskReq(q=users[-1], device=req.device)
-    history = [m.model_dump() for m in req.messages]
+    history = [m.model_dump(exclude_defaults=True) for m in req.messages]
     previous = conversations.get(req.conversation_id) if req.conversation_id else None
     if previous:
         for i, message in enumerate(history):
             saved = previous["messages"][i] if i < len(previous["messages"]) else {}
             if saved.get("role") == message["role"] and saved.get("content") == message["content"]:
                 history[i] = {**saved, **message}
+    req.messages = [ChatMsg(**message) for message in history]
     cid = conversations.save(history, req.conversation_id)
 
     def remember(result):
@@ -795,7 +827,7 @@ def _parse_suggestions(text):
 
 @router.post("/api/chat/suggestions")
 async def chat_suggestions(req: SuggestionsReq):
-    history = [m.model_dump() for m in req.messages if m.role in ("user", "assistant")][-12:]
+    history = [m.model_dump(include={"role", "content"}) for m in req.messages if m.role in ("user", "assistant")][-12:]
     if not history or history[-1]["role"] != "assistant":
         return {"suggestions": []}
     # Bound the background request while retaining the most recent conversation.
