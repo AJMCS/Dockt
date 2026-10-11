@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
-from urllib.request import Request
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -43,6 +46,57 @@ class FakeWinCall:
 
 
 class QuickChatTests(unittest.TestCase):
+    def test_capture_toggle_creates_and_removes_the_shared_pause_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pause_file = Path(directory) / ".dockt_pause"
+            with patch.object(quickchat, "CAPTURE_PAUSE_FILE", pause_file):
+                self.assertFalse(quickchat.capture_is_paused())
+                self.assertTrue(quickchat.toggle_capture())
+                self.assertTrue(pause_file.exists())
+                self.assertTrue(quickchat.capture_is_paused())
+                self.assertFalse(quickchat.toggle_capture())
+                self.assertFalse(pause_file.exists())
+
+    def test_options_panel_dismissal_does_not_run_quit_action(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        panel = Mock()
+        app.options_panel = panel
+        action = Mock()
+        app._run_option(action)
+        panel.destroy.assert_called_once_with()
+        action.assert_called_once_with()
+        self.assertIsNone(app.options_panel)
+
+    def test_clicking_outside_options_only_dismisses_the_panel(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        panel = Mock()
+        app.options_panel = panel
+        app.root = Mock()
+        app.root.focus_get.return_value = None
+        app._dismiss_options_if_focus_left(panel)
+        panel.destroy.assert_called_once_with()
+        app.root.destroy.assert_not_called()
+        self.assertIsNone(app.options_panel)
+
+    def test_focus_detection_only_keeps_options_open_for_its_own_widgets(self):
+        panel = ".!toplevel"
+        self.assertTrue(quickchat.QuickChat._focus_is_inside_options(
+            panel, ".!toplevel.!frame.!button"))
+        self.assertFalse(quickchat.QuickChat._focus_is_inside_options(panel, None))
+        self.assertFalse(quickchat.QuickChat._focus_is_inside_options(
+            panel, ".!other"))
+
+    def test_quit_closes_the_dashboard_and_quickchat(self):
+        root = Mock()
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app.root = root
+        app.hotkey = None
+        with patch.object(quickchat, "DESKTOP_CONTROL_PORT", 18765), \
+             patch.object(quickchat, "urlopen") as open_url:
+            app.close()
+        open_url.assert_called_once_with("http://127.0.0.1:18765/quit", timeout=1)
+        root.destroy.assert_called_once_with()
+
     def test_chat_request_sends_full_history_to_local_chat_api(self):
         history = [
             {"role": "user", "content": "Where is dinner?"},
@@ -213,6 +267,45 @@ class QuickChatTests(unittest.TestCase):
         self.assertEqual(dockt_desktop.clean_hash("/capture/9"), "#/capture/9")
         self.assertEqual(dockt_desktop.clean_hash("#/chat?q=hello"), "#/chat?q=hello")
         self.assertEqual(dockt_desktop.clean_hash("/settings"), "")
+
+    def test_dashboard_starts_hidden_and_centered_at_a_compact_size(self):
+        options = dockt_desktop.dashboard_window_options("")
+        self.assertTrue(options["hidden"])
+        self.assertEqual((options["width"], options["height"]), (1040, 700))
+        self.assertIsNone(options["x"])
+        self.assertIsNone(options["y"])
+        self.assertEqual(options["min_size"], (800, 540))
+        self.assertFalse(dockt_desktop.dashboard_window_options("#/capture/9")["hidden"])
+
+    def test_desktop_quit_control_closes_the_dashboard_window(self):
+        window = Mock()
+        previous = dockt_desktop.Control.window
+        dockt_desktop.Control.window = window
+        dockt_desktop.shutdown_requested.clear()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), dockt_desktop.Control)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_port}/quit", timeout=2) as response:
+                self.assertEqual(response.status, 200)
+            window.destroy.assert_called_once_with()
+            self.assertTrue(dockt_desktop.shutdown_requested.is_set())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            dockt_desktop.Control.window = previous
+            dockt_desktop.shutdown_requested.clear()
+
+    def test_dashboard_close_hides_it_but_quit_allows_shutdown(self):
+        window = Mock()
+        dockt_desktop.shutdown_requested.clear()
+        self.assertFalse(dockt_desktop.hide_dashboard_on_close(window))
+        window.hide.assert_called_once_with()
+        dockt_desktop.shutdown_requested.set()
+        self.assertTrue(dockt_desktop.hide_dashboard_on_close(window))
+        window.hide.assert_called_once_with()
+        dockt_desktop.shutdown_requested.clear()
 
     def test_quickchat_receives_the_resolved_desktop_service_url(self):
         with patch.dict(quickchat.os.environ,

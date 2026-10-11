@@ -6,6 +6,7 @@ from ctypes import wintypes
 from io import BytesIO
 import json
 import os
+from pathlib import Path
 import queue
 import re
 import shutil
@@ -31,6 +32,7 @@ MOD_CONTROL = 0x0002
 MOD_NOREPEAT = 0x4000
 VK_SPACE = 0x20
 CITATION = re.compile(r"\[#(\d+)\]")
+CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
 PALETTES = {
     "light": {
         "bg": "#FAF9F5", "surface": "#FFFFFF", "surface2": "#F5F4EE",
@@ -65,6 +67,20 @@ def _system_dark_mode() -> bool:
         except (OSError, subprocess.SubprocessError):
             return False
     return "dark" in os.environ.get("GTK_THEME", "").lower()
+
+
+def capture_is_paused() -> bool:
+    """Match the capture agent's shared per-user pause switch."""
+    return CAPTURE_PAUSE_FILE.exists()
+
+
+def toggle_capture() -> bool:
+    """Toggle capture and return True when capture is now paused."""
+    if capture_is_paused():
+        CAPTURE_PAUSE_FILE.unlink(missing_ok=True)
+        return False
+    CAPTURE_PAUSE_FILE.touch()
+    return True
 
 
 def _edge_path() -> str | None:
@@ -236,6 +252,9 @@ class QuickChat:
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("TFrame", background=colors["bg"])
+        style.configure("MenuCard.TFrame", background=colors["surface"])
+        style.configure("MenuCard.TLabel", background=colors["surface"],
+                        foreground=colors["text"], font=("Segoe UI", 12, "bold"))
         style.configure("TLabel", background=colors["bg"], foreground=colors["text"],
                         font=("Segoe UI", 11))
         style.configure("Muted.TLabel", background=colors["bg"], foreground=colors["muted"],
@@ -247,6 +266,15 @@ class QuickChat:
                         foreground=colors["on_accent"], bordercolor=colors["accent"],
                         padding=(12, 8), font=("Segoe UI", 10, "bold"))
         style.map("Accent.TButton", background=[("active", "#6AA600")])
+        style.configure("Menu.TButton", background=colors["surface"],
+                        foreground=colors["text"], bordercolor=colors["surface"],
+                        anchor="w", padding=(12, 9), font=("Segoe UI", 10))
+        style.map("Menu.TButton", background=[("active", colors["accent_soft"])],
+                  foreground=[("active", colors["text"])])
+        style.configure("MenuDanger.TButton", background=colors["surface"],
+                        foreground=colors["error"], bordercolor=colors["surface"],
+                        anchor="w", padding=(12, 9), font=("Segoe UI", 10))
+        style.map("MenuDanger.TButton", background=[("active", colors["accent_soft"])])
         style.configure("Citation.TButton", background=colors["accent_soft"],
                         foreground=colors["accent_text"], bordercolor=colors["accent_soft"],
                         padding=(5, 2), font=("Segoe UI", 9, "bold"))
@@ -354,13 +382,7 @@ class QuickChat:
         self.pet_dragged = False
         self.pet_bob = 0
         self.pet_hint_visible = False
-        self.pet_menu = tk.Menu(self.pet, tearoff=0, bg=self.colors["surface"],
-                                fg=self.colors["text"], activebackground=self.colors["accent_soft"],
-                                activeforeground=self.colors["text"])
-        self.pet_menu.add_command(label="Open Quick Chat", command=self.show)
-        self.pet_menu.add_command(label="Hide Dockt Pet", command=self.hide_pet)
-        self.pet_menu.add_separator()
-        self.pet_menu.add_command(label="Quit Dockt", command=self.close)
+        self.options_panel = None
         self._place_pet()
         self._draw_pet()
         self.pet.after(520, self._animate_pet)
@@ -442,7 +464,87 @@ class QuickChat:
             self.show()
 
     def _pet_menu(self, event):
-        self.pet_menu.tk_popup(event.x_root, event.y_root)
+        self._close_options_panel()
+        panel = tk.Toplevel(self.pet)
+        self.options_panel = panel
+        panel.overrideredirect(True)
+        panel.attributes("-topmost", True)
+        panel.configure(bg=self.colors["line"])
+
+        card = ttk.Frame(panel, padding=(8, 8), style="MenuCard.TFrame")
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        header = ttk.Frame(card, style="MenuCard.TFrame")
+        header.pack(fill="x", padx=6, pady=(4, 8))
+        ttk.Label(header, text="Dockt controls", font=("Segoe UI", 12, "bold"),
+                  style="MenuCard.TLabel").pack(side="left")
+        ttk.Button(header, text="×", width=3, style="Menu.TButton",
+                   command=self._close_options_panel).pack(side="right")
+
+        self._add_option(card, "Open Quick Chat", self.show)
+        self._add_option(card, "Open Dashboard", lambda: open_dockt())
+        self._add_option(card, "Hide Dockt Pet", self.hide_pet)
+        self.capture_option = self._add_option(card, self._capture_menu_label(), self._toggle_capture)
+        ttk.Separator(card).pack(fill="x", padx=6, pady=6)
+        self._add_option(card, "Quit Dockt", self.close, danger=True)
+
+        panel.update_idletasks()
+        width, height = panel.winfo_reqwidth(), panel.winfo_reqheight()
+        screen_w, screen_h = panel.winfo_screenwidth(), panel.winfo_screenheight()
+        x = min(event.x_root, screen_w - width - 8)
+        y = event.y_root if event.y_root + height <= screen_h else event.y_root - height
+        panel.geometry(f"+{max(8, x)}+{max(8, y)}")
+        panel.bind("<Escape>", lambda _event: self._close_options_panel())
+        panel.bind("<FocusOut>", self._options_focus_out, add="+")
+        panel.focus_force()
+
+    def _add_option(self, parent, label: str, action, danger: bool = False):
+        style = "MenuDanger.TButton" if danger else "Menu.TButton"
+        button = ttk.Button(parent, text=label, style=style,
+                            command=lambda: self._run_option(action))
+        button.pack(fill="x", padx=2, pady=1)
+        return button
+
+    def _run_option(self, action):
+        self._close_options_panel()
+        action()
+
+    def _close_options_panel(self):
+        panel = getattr(self, "options_panel", None)
+        self.options_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except tk.TclError:
+                pass
+
+    def _options_focus_out(self, _event=None):
+        panel = self.options_panel
+        if panel is not None:
+            panel.after(120, lambda: self._dismiss_options_if_focus_left(panel))
+
+    @staticmethod
+    def _focus_is_inside_options(panel, focus) -> bool:
+        return focus is not None and str(focus).startswith(str(panel))
+
+    def _dismiss_options_if_focus_left(self, panel):
+        if self.options_panel is not panel:
+            return
+        try:
+            focus = self.root.focus_get()
+        except tk.TclError:
+            focus = None
+        if not self._focus_is_inside_options(panel, focus):
+            self._close_options_panel()
+
+    @staticmethod
+    def _capture_menu_label() -> str:
+        return "Resume screen capture" if capture_is_paused() else "Pause screen capture"
+
+    def _toggle_capture(self):
+        paused = toggle_capture()
+        if self.options_panel is not None and hasattr(self, "capture_option"):
+            self.capture_option.configure(text=self._capture_menu_label())
+        self.status.set("Screen capture paused" if paused else "Screen capture resumed")
 
     def toggle(self):
         if self.chat.state() == "withdrawn":
@@ -650,6 +752,11 @@ class QuickChat:
     def close(self):
         if self.hotkey:
             self.hotkey.stop()
+        try:
+            with urlopen(f"http://127.0.0.1:{DESKTOP_CONTROL_PORT}/quit", timeout=1):
+                pass
+        except Exception:
+            pass  # The dashboard may already be closed (for example, during shutdown).
         self.root.destroy()
 
 

@@ -4,7 +4,7 @@
 
 ## Current Windows desktop launcher
 
-Run `start-dockt.bat` from the `dockt-patched` folder. It opens the native Dockt dashboard, starts local capture and the quick-chat pet, and uses the GX10 address from `gx10.txt` (or `DOCKT_GX10`). Add `--mock` to run the dashboard and chat against the local mock model without the GX10. Click the pet to open quick chat; `Ctrl+Space` toggles the chat window and `Esc` hides it.
+Run `start-dockt.bat` from the `dockt-patched` folder. It starts local capture and the quick-chat pet; the dashboard opens hidden so startup leaves the pet as the only Dockt window on screen. Right-click the pet for the styled controls panel; choose **Open Dashboard** to show the centered 1040×700 dashboard. Closing that window hides it and leaves the pet running. Choose **Quit Dockt** in the controls panel to close the full session. The launcher uses the GX10 address from `gx10.txt` (or `DOCKT_GX10`). Add `--mock` to run against the local mock model without the GX10. Click the pet to open quick chat; `Ctrl+Space` toggles the chat window and `Esc` hides it. The controls panel also lets you pause or resume screen capture; paused state is shared with `agent/capture.py` through `~/.dockt_pause`.
 
 Run the regression and local API smoke tests from this folder with:
 

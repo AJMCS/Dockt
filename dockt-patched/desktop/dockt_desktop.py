@@ -11,7 +11,8 @@ On Windows run it with pythonw.exe (Dockt.bat does) so no console shows.
 If the local service isn't answering on 127.0.0.1:8000, this starts server/app.py (plus
 tools/mock_models.py with --mock) and agent/capture.py, then opens a native window on the
 dashboard: WebView2 on Windows (built into Windows 10/11), WebKit on macOS. Closing the
-window stops whatever this process started; a service someone else started is left alone.
+window hides it so the pet stays available; choosing Quit Dockt from the pet ends the session
+and stops whatever services this process started. A service started elsewhere is left alone.
 
 Only one window runs. A second launch, or `--open`, hands its link to the running window
 through http://127.0.0.1:8765/open?hash=<#/...> (Lane 1's tray and quick-chat can call
@@ -41,6 +42,7 @@ CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
 ICON = Path(__file__).with_name("dockt.ico")
 
 children: list[subprocess.Popen] = []
+shutdown_requested = threading.Event()
 
 
 # ---------- helpers ----------
@@ -58,6 +60,15 @@ def clean_hash(h: str | None) -> str:
     if h.startswith("#"):
         h = h[1:].lstrip("/")
     return "#/" + h if h.startswith(("capture/", "chat?")) else ""
+
+
+def dashboard_window_options(h: str) -> dict:
+    """Keep startup out of the way; explicit deep links request a visible window."""
+    return {
+        "width": 1040, "height": 700, "x": None, "y": None,
+        "min_size": (800, 540), "hidden": not bool(h),
+        "background_color": "#FAF9F5", "text_select": True,
+    }
 
 
 def port_free(port: int) -> bool:
@@ -156,6 +167,13 @@ class Control(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
+        if u.path == "/quit":
+            shutdown_requested.set()
+            self.send_response(200)
+            self.end_headers()
+            if self.window is not None:
+                self.window.destroy()
+            return
         if u.path != "/open":
             self.send_response(404)
             self.end_headers()
@@ -179,6 +197,14 @@ def show(window, h: str):
         pass
     if h:   # the dashboard routes on hashchange (index.html, "deep links")
         window.evaluate_js(f"location.hash = {json.dumps(h)}")
+
+
+def hide_dashboard_on_close(window) -> bool:
+    """Closing the dashboard hides it; Quit Dockt explicitly ends the session."""
+    if shutdown_requested.is_set():
+        return True
+    window.hide()
+    return False  # pywebview interprets False as canceling the close event
 
 
 def hand_off(h: str) -> bool:
@@ -250,7 +276,8 @@ def main():
 
     window = webview.create_window(
         "Dockt", html=LOADING.replace("__TEXT__", "Starting Dockt on this laptop…"),
-        width=1366, height=860, min_size=(900, 600), background_color="#FAF9F5", text_select=True)
+        **dashboard_window_options(h))
+    window.events.closing += lambda: hide_dashboard_on_close(window)
     if control:
         Control.window = window
         threading.Thread(target=control.serve_forever, daemon=True).start()
