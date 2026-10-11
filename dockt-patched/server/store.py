@@ -232,6 +232,20 @@ class Store:
             self.db.execute("UPDATE commitments SET done=? WHERE id=?", (1 if done else 0, cid))
             self.db.commit()
 
+    def update_commitment(self, cid, capture_row, item) -> bool:
+        """Rewrite an open commitment in place when a later screen changes it (e.g. a new time),
+        pointing it at the capture that shows the change. Returns False if no open commitment has
+        that id. In place, so the dedup in add_commitments keeps blocking the old version."""
+        with self.lock:
+            cur = self.db.execute(
+                "UPDATE commitments SET capture_id=?, ts=?, kind=?, text=?, who=?, due=? "
+                "WHERE id=? AND done=0",
+                (capture_row["id"], capture_row["ts"], (item.get("kind") or "promise")[:20],
+                 (item.get("text") or "").strip()[:240], (item.get("who") or "")[:60],
+                 (item.get("due") or "")[:60], cid))
+            self.db.commit()
+            return cur.rowcount > 0
+
     def agent_ping(self, device, session, checks, sent):
         with self.lock:
             self.db.execute(

@@ -38,3 +38,4 @@ activity = store.activity
 commitments = store.commitments
 add_commitments = store.add_commitments
 set_commitment_done = store.set_commitment_done
+update_commitment = store.update_commitment

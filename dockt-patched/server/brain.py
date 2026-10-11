@@ -94,15 +94,53 @@ def _diverse(rows, per_window=2):
 EXTRACT_ENABLED = os.environ.get("EXTRACT_ENABLED", "1") == "1"
 EXTRACT_CONCURRENCY = int(os.environ.get("EXTRACT_CONCURRENCY", "4"))
 
-EXTRACT_SYSTEM = """You read text captured from one person's computer screen and pull out COMMITMENTS:
-- promise: something the person said they will do ("I'll send the deck by Friday", "will follow up tomorrow")
-- deadline: a due date or time that applies to them ("due Oct 30", "submission closes Sun 1:30 PM")
+# The extractor MAINTAINS a live list of commitments across captures, instead of only adding.
+# A new capture can add a commitment, update an existing one (e.g. a rescheduled time), or cancel
+# it. Updated/cancelled commitments are retired (marked done) rather than deleted, so a wrong call
+# is recoverable and the raw capture stays searchable — the "tentative vs confirmed" split lives here:
+# every extraction is tentative; the open (not-retired) set is what the UI shows as current.
+EXTRACT_SYSTEM = """You maintain one person's list of COMMITMENTS from their screen captures:
+- promise: something the person said they will do ("I'll send the deck by Friday")
+- deadline: a due date/time that applies to them ("due Oct 30")
 - request: something someone else asked them to do that is still open ("can you review the redline?")
-Return ONLY a JSON array, no prose. Each item: {"kind": "promise"|"deadline"|"request", "text": "<one specific line, keep names/numbers/dates>", "who": "<who owes it: 'me' or a name>", "due": "<date/time as written, or ''>"}
-Rules: only concrete actions or dates; skip menus, navigation, ads, boilerplate, code, and anything marked done. At most 4 items. If nothing qualifies, return []."""
+
+You are given the person's CURRENT OPEN COMMITMENTS (each with an id and the time it was seen) and
+ONE new screen capture with the time it was seen. Captures can arrive out of order.
+Decide what this screen changes. Return ONLY a JSON array, no prose. Each item is one of:
+- {"op":"add","kind":...,"text":"<one specific line, keep names/numbers/dates>","who":"<'me' or a name>","due":"<as written or ''>"}
+- {"op":"update","id":<existing id>,"kind":...,"text":...,"who":...,"due":...}   // this screen CHANGES that commitment (new time/date/place for the same plan)
+- {"op":"cancel","id":<existing id>}                                              // this screen says that commitment is called off / handed to someone else
+
+Rules:
+- If this screen refers to an existing open commitment (same plan/person), prefer update or cancel over adding a duplicate.
+- Update only when the screen explicitly changes it ("actually", "instead", "moved to", "can we do X instead").
+  The same commitment shown again unchanged → nothing to do.
+- Use the seen times: if this screen was seen BEFORE an existing commitment about the same plan, it is outdated — do not add or change anything for that plan.
+- If a single screen shows a plan AND its later correction, add/update with the corrected final version only.
+- A plan the person states themselves ("let us meet at 5 PM") counts, even with no reply yet.
+- Skip menus, ads, code, and vague suggestions with no concrete plan ("maybe we could grab coffee sometime next week?").
+- Nothing to do → []. At most 4 items.
+
+Examples:
+OPEN: (none)  SCREEN seen 09:00: "Electric bill — amount due $84.20 — pay by Nov 3"
+→ [{"op":"add","kind":"deadline","text":"Electric bill $84.20 due Nov 3","who":"me","due":"Nov 3"}]
+OPEN: (none)  SCREEN seen 09:00: "Alex: dinner at 7?" / "me: yes, 7 works"
+→ [{"op":"add","kind":"promise","text":"Dinner with Alex at 7","who":"me","due":"7 PM"}]
+OPEN: [id=2] seen 09:00 · promise · me: Dinner with Alex at 7   SCREEN seen 09:03: "Alex: dinner at 7?" / "me: yes, 7 works"
+→ []   (same commitment, unchanged)
+OPEN: [id=3] seen 09:00 · promise · me: Dinner with Alex at 7   SCREEN seen 09:05: "Alex: dinner at 7?" / "me: yes" / "Alex: wait, can we do 8 instead?" / "me: sure"
+→ [{"op":"update","id":3,"kind":"promise","text":"Dinner with Alex at 8","who":"me","due":"8 PM"}]
+OPEN: [id=4] seen 09:05 · promise · me: Dinner with Alex at 8   SCREEN seen 09:00: "Alex: dinner at 7?" / "me: yes, 7 works"
+→ []   (this screen is older than id=4)
+OPEN: (none)  SCREEN seen 09:05: "me: call at 3 PM" / "me: no wait, 4 PM"
+→ [{"op":"add","kind":"promise","text":"Call at 4 PM","who":"me","due":"4 PM"}]
+OPEN: [id=5] seen 09:00 · request · me: Review Jo's slides by Fri   SCREEN seen 09:10: "Jo: never mind, Kim will review them"
+→ [{"op":"cancel","id":5}]
+OPEN: (none)  SCREEN seen 09:00: "Sam: maybe we could grab coffee sometime next week?"
+→ []"""
 
 
-def _parse_items(text: str) -> list[dict]:
+def _parse_ops(text: str) -> list[dict]:
     text = text or ""
     i, j = text.find("["), text.rfind("]")
     if i < 0 or j <= i:
@@ -113,19 +151,85 @@ def _parse_items(text: str) -> list[dict]:
         return []
     out = []
     for it in data if isinstance(data, list) else []:
-        if isinstance(it, dict) and isinstance(it.get("text"), str) and it["text"].strip():
-            out.append(it)
+        if not isinstance(it, dict):
+            continue
+        op = (it.get("op") or "add").lower()
+        if op not in ("add", "update", "cancel"):
+            continue
+        if op in ("add", "update") and not (isinstance(it.get("text"), str) and it["text"].strip()):
+            continue
+        out.append(it)
     return out[:4]
 
 
-async def extract_one(row, sem):
-    async with sem:
+def _apply_ops(row, ops, allowed: set[int], newer: set[int]) -> list[dict]:
+    """Apply the extractor's ops: update in place, cancel = retire (done, not deleted), add new.
+    Only `allowed` ids (same window, seen no later than this screen) may be updated/cancelled;
+    an op aimed at a `newer` commitment is outdated and dropped. Returns the commitments added."""
+    adds = []
+    for it in ops:
+        op = (it.get("op") or "add").lower()
         try:
-            user = (f"Screen capture to scan for commitments.\n"
-                    f"App: {row['app']} — {row['title']}\nSeen: {_fmt_time(row['ts'])}\n"
+            tid = int(it.get("id"))
+        except (TypeError, ValueError):
+            tid = None
+        if tid in newer:
+            print(f"capture #{row['id']}: dropped outdated {op} of newer commitment #{tid}")
+            continue
+        if tid not in allowed:
+            tid = None
+        item = {k: it.get(k) for k in ("kind", "text", "who", "due")}
+        if op == "cancel" and tid is not None:
+            memory.set_commitment_done(tid, True)
+            print(f"commitment #{tid} cancelled by capture #{row['id']}")
+        elif op == "update" and tid is not None and memory.update_commitment(tid, row, item):
+            print(f"commitment #{tid} updated by capture #{row['id']}: {item['text']}")
+        elif op in ("add", "update"):  # an update whose id isn't an open commitment becomes an add
+            adds.append(item)
+    # one screen often shows a plan and its correction ("5 PM" … "actually 8 PM") and the model may
+    # return both; near-duplicates within this screen keep only the later one (lower on screen = newer)
+    kept = []
+    for a in adds:
+        kept = [k for k in kept if not _near_dup(k.get("text"), a.get("text"))] + [a]
+    return memory.add_commitments(row, kept) if kept else []
+
+
+def _near_dup(a, b, thresh=0.6):
+    """Same word-overlap test store.add_commitments uses for its dedup."""
+    wa, wb = (set(re.findall(r"[a-z0-9]+", (x or "").lower())) for x in (a, b))
+    return bool(wa and wb) and len(wa & wb) / len(wa | wb) >= thresh
+
+
+_window_locks: dict[tuple, asyncio.Lock] = {}
+
+
+async def extract_one(row, sem):
+    # captures of the same window run one at a time (so an update sees the commitment it changes);
+    # different windows still run in parallel. Lock before the semaphore so waiting doesn't hold a slot.
+    lock = _window_locks.setdefault((row["device"], row["app"], row["title"]), asyncio.Lock())
+    async with lock, sem:
+        try:
+            # ±2h: captures arrive out of order, so a commitment from a *later* screen must be visible too.
+            # Only commitments from this same window (app + title): a "meet at 8" in a Kakao chat with Lily
+            # must not be read as a change to "dinner at 8" from a Slack channel.
+            recent = memory.commitments(row["ts"] - 7200, row["ts"] + 7200, row["device"],
+                                        include_done=False, limit=50)
+            src = {c["id"]: (c["app"], c["title"]) for c in memory.many([c["capture_id"] for c in recent])}
+            recent = [c for c in recent if src.get(c["capture_id"]) == (row["app"], row["title"])][:20]
+            ctx = "\n".join(
+                f"[id={c['id']}] seen {_fmt_time(c['ts'])} · {c['kind']} · {c['who']}: {c['text']}"
+                + (f" (due {c['due']})" if c["due"] else "")
+                for c in recent) or "(none)"
+            # the time comparison is done here, exactly; the model only judges whether it's the same plan
+            newer = [c["id"] for c in recent if c["ts"] > row["ts"]]
+            note = (f"\nNOTE: this screen was seen BEFORE open commitment(s) {', '.join(f'id={i}' for i in newer)}. "
+                    f"Anything here about the same plan as those is outdated.") if newer else ""
+            user = (f"CURRENT OPEN COMMITMENTS:\n{ctx}\n\n"
+                    f"NEW SCREEN CAPTURE\nApp: {row['app']} — {row['title']}\nSeen: {_fmt_time(row['ts'])}{note}\n"
                     f"Summary: {row['summary']}\nScreen text:\n{(row['ocr'] or '')[:1500]}")
             out = await models.chat(EXTRACT_SYSTEM, user, max_tokens=300, temperature=0)
-            added = memory.add_commitments(row, _parse_items(out))
+            # an older screen may never update/cancel a commitment from a newer one, whatever the model says
+            added = _apply_ops(row, _parse_ops(out), {c["id"] for c in recent if c["ts"] <= row["ts"]}, set(newer))
             memory.store.mark_extracted(row["id"], ok=True)
             for a in added:
                 print(f"promise found in #{row['id']}: {a['text']}")
@@ -152,7 +256,9 @@ async def extractor():
     while True:
         free = EXTRACT_CONCURRENCY * 2 - len(inflight)
         rows = memory.store.claim_extract(free) if free > 0 else []
-        for r in rows:
+        # oldest first: an update/cancel must be processed after the commitment it supersedes exists
+        # (claim_extract returns newest-first). With EXTRACT_CONCURRENCY=1 this is strict order.
+        for r in sorted(rows, key=lambda r: r["ts"]):
             t = asyncio.create_task(extract_one(r, sem))
             inflight.add(t)
             t.add_done_callback(inflight.discard)
