@@ -436,11 +436,12 @@ class QuickChat:
         self.pet_canvas.bind("<Button-3>", self._pet_menu)
         self.pet_canvas.bind("<Enter>", lambda _event: self._pet_hint(True))
         self.pet_canvas.bind("<Leave>", self._schedule_pet_hint_hide)
+        self.pet_canvas.bind("<Motion>", self._pet_motion)
         self.pet_xy = (0, 0)
         self.pet_dragged = False
         self.pet_bob = 0
         self.pet_hint_visible = False
-        self.hint_panel = None
+        self.pet_hover_button = None
         self._hint_hide_job = None
         self.options_panel = None
         self._place_pet()
@@ -486,7 +487,65 @@ class QuickChat:
                                 fill="#ECF2E9", outline="")
         canvas.create_rectangle(left + 7 * size, eye_y + 10, left + 9 * size,
                                 eye_y + 12, fill="#90B87B", outline="")
+        if self.pet_hint_visible:
+            self._draw_pet_controls(canvas)
         canvas.scale("all", 0, 0, self.ui_scale, self.ui_scale)
+
+    @staticmethod
+    def _rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+        points = [x1 + radius, y1, x2 - radius, y1, x2, y1,
+                  x2, y1 + radius, x2, y2 - radius, x2, y2,
+                  x2 - radius, y2, x1 + radius, y2, x1, y2,
+                  x1, y2 - radius, x1, y1 + radius, x1, y1]
+        return canvas.create_polygon(*points, smooth=True, splinesteps=12, **kwargs)
+
+    def _draw_pet_controls(self, canvas):
+        self._rounded_rect(canvas, 43, 110, 117, 138, 14, fill="#252824",
+                           outline="#454A43", width=1, tags=("pet-control-bar",))
+        for name, center in (("chat", 64), ("menu", 96)):
+            active = self.pet_hover_button == name
+            fill = "#41493B" if active else "#30342F"
+            outline = "#90B87B" if active else "#50564D"
+            canvas.create_oval(center - 10, 114, center + 10, 134, fill=fill,
+                               outline=outline, width=1.3,
+                               tags=("pet-control", f"pet-control-{name}"))
+            if name == "chat":
+                canvas.create_rectangle(center - 5, 119, center + 5, 127,
+                                        outline="#F1F3EE", width=1.5,
+                                        tags=("pet-control", f"pet-control-{name}"))
+                canvas.create_line(center - 2, 127, center - 3, 130, center + 1, 127,
+                                   fill="#F1F3EE", width=1.5,
+                                   tags=("pet-control", f"pet-control-{name}"))
+            else:
+                for y in (120, 124, 128):
+                    canvas.create_oval(center - 1.5, y - 1.5, center + 1.5, y + 1.5,
+                                       fill="#F1F3EE", outline="",
+                                       tags=("pet-control", f"pet-control-{name}"))
+
+            if active:
+                title = "Open quick chat" if name == "chat" else "More options"
+                tooltip_width = 82 if name == "chat" else 68
+                left = max(6, min(154 - tooltip_width, center - tooltip_width / 2))
+                self._rounded_rect(canvas, left, 89, left + tooltip_width, 106, 8,
+                                   fill="#252824", outline="#454A43", width=1,
+                                   tags=("pet-tooltip",))
+                canvas.create_text(left + tooltip_width / 2, 97.5, text=title,
+                                   fill="#F1F3EE", font=("Segoe UI", 8),
+                                   tags=("pet-tooltip",))
+
+    def _pet_button_at(self, x, y):
+        x, y = x / self.ui_scale, y / self.ui_scale
+        if 54 <= x <= 74 and 114 <= y <= 134:
+            return "chat"
+        if 86 <= x <= 106 and 114 <= y <= 134:
+            return "menu"
+        return None
+
+    def _pet_motion(self, event):
+        button = self._pet_button_at(event.x, event.y) if self.pet_hint_visible else None
+        if button != self.pet_hover_button:
+            self.pet_hover_button = button
+            self._draw_pet()
     def _animate_pet(self):
         if not self.pet.winfo_exists():
             return
@@ -501,57 +560,10 @@ class QuickChat:
             except tk.TclError:
                 pass
             self._hint_hide_job = None
-        if self.hint_panel is not None:
-            if not visible:
-                self.hint_panel.destroy()
-                self.hint_panel = None
+        self.pet_hint_visible = visible
         if not visible:
-            self.pet_hint_visible = False
-            return
-        if self.hint_panel is not None:
-            self.pet_hint_visible = True
-            return
-        self.pet_hint_visible = True
-        panel = tk.Toplevel(self.root)
-        self.hint_panel = panel
-        panel.overrideredirect(True)
-        panel.attributes("-topmost", True)
-        panel.configure(bg="#363A3D", padx=12, pady=9)
-        panel.bind("<Enter>", lambda _event: self._pet_hint(True))
-        panel.bind("<Leave>", self._schedule_pet_hint_hide)
-        for row, text in enumerate(("Click to chat", "Click for options")):
-            row_frame = tk.Frame(panel, bg="#363A3D", cursor="hand2")
-            row_frame.grid(row=row, column=0, sticky="ew")
-            icon = tk.Canvas(row_frame, width=round(24*self.ui_scale),
-                             height=round(22*self.ui_scale), bg="#363A3D",
-                             highlightthickness=0, cursor="hand2")
-            icon.pack(side="left", padx=(0, 8), pady=3)
-            if row == 0:
-                icon.create_rectangle(3, 3, 20, 15, outline="#E4E7E9", width=2)
-                icon.create_line(8, 15, 8, 19, 13, 15, fill="#E4E7E9", width=2)
-            else:
-                icon.create_oval(6, 2, 18, 21, outline="#E4E7E9", width=2)
-                icon.create_line(12, 3, 12, 10, fill="#E4E7E9", width=2)
-                icon.create_rectangle(13, 4, 16, 9, fill="#90B87B", outline="")
-            icon.scale("all", 0, 0, self.ui_scale, self.ui_scale)
-            for item in icon.find_all():
-                if icon.itemcget(item, "width"):
-                    icon.itemconfigure(item, width=2*self.ui_scale)
-            label = tk.Label(row_frame, text=text, bg="#363A3D", fg="#E4E7E9",
-                             font=("Segoe UI", 10), cursor="hand2")
-            label.pack(side="left", pady=3)
-            for widget in (row_frame, icon, label):
-                widget.bind("<Enter>", lambda _event: self._pet_hint(True))
-                widget.bind("<Leave>", self._schedule_pet_hint_hide)
-                if row == 0:
-                    widget.bind("<Button-1>", lambda _event: self.show())
-                else:
-                    widget.bind("<Button-1>", lambda event: self._show_options_at(event.x_root, event.y_root))
-        panel.update_idletasks()
-        width, height = panel.winfo_reqwidth(), panel.winfo_reqheight()
-        x = max(8, min(self.pet.winfo_x(), self.pet.winfo_screenwidth()-width-8))
-        y = max(8, self.pet.winfo_y()-height-8)
-        panel.geometry(f"+{x}+{y}")
+            self.pet_hover_button = None
+        self._draw_pet()
 
     def _schedule_pet_hint_hide(self, _event=None):
         if self._hint_hide_job is not None:
@@ -574,8 +586,13 @@ class QuickChat:
             self.pet.geometry(f"+{event.x_root - self.pet_xy[0]}+{event.y_root - self.pet_xy[1]}")
 
     def _pet_release(self, _event):
-        if not self.pet_dragged:
+        if self.pet_dragged:
+            return
+        button = self._pet_button_at(_event.x, _event.y)
+        if button == "chat":
             self.show()
+        elif button == "menu":
+            self._pet_menu(_event)
 
     def _pet_menu(self, event):
         self._pet_hint(False)
@@ -689,8 +706,8 @@ class QuickChat:
         scale = ctk.ScalingTracker.get_window_scaling(self.chat)
         width, height = self.chat.winfo_width(), self.chat.winfo_height()
         screen_width, screen_height = self.chat.winfo_screenwidth(), self.chat.winfo_screenheight()
-        x = max(0, min(self.pet.winfo_x() - width + 30, screen_width - width))
-        y = max(0, min(self.pet.winfo_y() - height + 15, screen_height - height))
+        x = max(0, (screen_width - width) / 2)
+        y = max(0, (screen_height - height) / 2)
         self.chat.geometry(f"{round(width/scale)}x{round(height/scale)}+{round(x/scale)}+{round(y/scale)}")
         self.chat.deiconify()
         self.chat.lift()

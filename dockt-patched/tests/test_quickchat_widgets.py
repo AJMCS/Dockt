@@ -117,30 +117,65 @@ class QuickChatWidgetTests(unittest.TestCase):
         self.assertLessEqual(bounds[2], 160*app.ui_scale)
         self.assertLessEqual(bounds[3], 140*app.ui_scale)
 
-    def test_pet_hint_stays_open_across_pointer_handoff_and_actions_are_clickable(self):
+    def test_pet_click_does_not_open_chat_but_bottom_icon_buttons_do(self):
         root, app = self.make_app(96/72)
+        app.pet.geometry("160x140+10000+10000")
+        app.pet.deiconify()
         app._pet_hint(True)
         root.update()
-        hint = app.hint_panel
-        rows = hint.winfo_children()
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(app.pet_canvas.find_withtag("pet-control-bar")), 1)
+        control_bounds = app.pet_canvas.bbox("pet-control-bar")
+        self.assertGreater(control_bounds[1], 100)
+        self.assertLessEqual(control_bounds[3], 140)
 
         app._schedule_pet_hint_hide()
         pending_hide = app._hint_hide_job
-        app._pet_hint(True)  # entering the tooltip cancels the pet's delayed leave
+        app._pet_hint(True)
         self.assertIsNone(app._hint_hide_job)
-        self.assertEqual(app.hint_panel, hint)
         self.assertIsNotNone(pending_hide)
 
         with patch.object(app, "show") as show:
-            rows[0].event_generate("<Button-1>")
+            app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=70)
+            app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=70)
+            root.update()
+            show.assert_not_called()
+
+            app.pet_canvas.event_generate("<ButtonPress-1>", x=64, y=124)
+            app.pet_canvas.event_generate("<ButtonRelease-1>", x=64, y=124)
             root.update()
             show.assert_called_once_with()
 
-        with patch.object(app, "_show_options_at") as show_options:
-            rows[1].event_generate("<Button-1>", x=8, y=8)
+        with patch.object(app, "_pet_menu") as show_options:
+            app.pet_canvas.event_generate("<ButtonPress-1>", x=96, y=124)
+            app.pet_canvas.event_generate("<ButtonRelease-1>", x=96, y=124)
             root.update()
             show_options.assert_called_once()
+
+        app.pet_canvas.event_generate("<Motion>", x=64, y=124)
+        root.update()
+        titles = [app.pet_canvas.itemcget(item, "text")
+                  for item in app.pet_canvas.find_withtag("pet-tooltip")
+                  if app.pet_canvas.type(item) == "text"]
+        self.assertEqual(titles, ["Open quick chat"])
+
+    def test_quick_chat_window_is_centered_when_opened(self):
+        for scaling in (96/72, 144/72, 192/72):
+            with self.subTest(scaling=scaling):
+                root, app = self.make_app(scaling)
+                app.hide()
+                root.update()
+                app.show()
+                root.update()
+                geometry = app.chat.geometry()
+                match = __import__("re").search(r"\+(\d+)\+(\d+)$", geometry)
+                self.assertIsNotNone(match)
+                x, y = map(int, match.groups())
+                scale = ctk.ScalingTracker.get_window_scaling(app.chat)
+                expected_x = (app.chat.winfo_screenwidth() - app.chat.winfo_width()) / (2 * scale)
+                expected_y = (app.chat.winfo_screenheight() - app.chat.winfo_height()) / (2 * scale)
+                self.assertAlmostEqual(x, expected_x, delta=2)
+                self.assertAlmostEqual(y, expected_y, delta=2)
+                self.destroy(root)
 
     def test_opening_chat_does_not_repeat_focus_for_child_map_events(self):
         root, app = self.make_app(96/72)
