@@ -238,7 +238,8 @@ You cannot see the screens directly: use the tools to look things up before answ
 - draft: write an email/message/todo/notes from captures. Return the draft text as your answer.
 Rules:
 - Every fact must cite the capture it came from as [#id] (one id per bracket, e.g. [#3] [#7]), using ONLY ids that appear in tool results.
-- If the tools return nothing relevant, say "I didn't see that on your screens." Never guess.
+- If the tools return nothing about what was asked, answer in ONE sentence: "I didn't see <the thing> on your screens." Do NOT list or describe the captures you looked at, and do NOT cite anything.
+- Answer the question directly and briefly (usually under 80 words). Cite only the few captures (1-5) that actually support the answer. Never walk through captures one by one.
 - Be concise and specific: names, numbers, times, durations.
 Times are local, written as YYYY-MM-DD HH:MM. Now is {now}."""
 
