@@ -764,8 +764,7 @@ function renderFinal(turn, ev) {
   turn.msg.dataset.ids = (cited.length ? cited : turn.sources.slice(0, 3).map(s => s.id)).join(",");
   turn.body.innerHTML = linkCites(ev.answer, known);
   addSourceStrip(turn.msg, turn.sources, cited);
-  if (turn.sources.length)
-    turn.msg.insertAdjacentHTML("beforeend", `<div class="actions">${draftButtons("answer")}</div>`);
+  renderSuggestions(turn.msg, ev.suggestions || []);
   showSources(turn.sources, cited);
 }
 
@@ -790,6 +789,8 @@ function handleEvent(turn, ev) {
       renderFinal(turn, ev);
       messages.push({role: "assistant", content: ev.answer, sources: slim(turn.sources), cited: ev.cited || [], ms: ev.ms});
       chatId = ev.conversation_id || chatId;
+      chatTs = ev.conversation_updated_at || chatTs;
+      requestSuggestions(turn.msg);
       refreshChats();
       break;
     case "error":    // ev.text can be a raw exception: never show it
@@ -997,7 +998,7 @@ function renderConversation() {
       body.innerHTML = md(m.content) + `<div class="actions"><button class="btn copy">Copy</button></div>`;
       body.querySelector(".copy").onclick = () => navigator.clipboard.writeText(m.content);
       addSourceStrip(msg, m.sources || [], m.cited || []);
-    } else renderFinal({msg, body, sources: m.sources || []}, {answer: m.content, cited: m.cited || [], ms: m.ms});
+    } else renderFinal({msg, body, sources: m.sources || []}, {answer: m.content, cited: m.cited || [], ms: m.ms, suggestions: m.suggestions});
   }
   scrollThread();
 }
@@ -1029,6 +1030,42 @@ $("#thread").innerHTML = WELCOME;
 $("#sources").innerHTML = NO_SOURCES;
 
 // ---------- act ----------
+function renderSuggestions(msg, items) {
+  msg.querySelector(".suggestions")?.remove();
+  if (!Array.isArray(items)) return;
+  const actions = document.createElement("div");
+  actions.className = "actions suggestions";
+  actions.setAttribute("aria-label", "Suggested next steps");
+  for (const item of items.slice(0, 3)) {
+    if (!item || typeof item.label !== "string" || typeof item.prompt !== "string" ||
+        !item.label.trim() || !item.prompt.trim() || item.label.length > 80 || item.prompt.length > 500) continue;
+    const button = document.createElement("button");
+    button.className = "btn";
+    button.textContent = item.label;
+    button.title = item.prompt;
+    button.onclick = () => { if (!busy) sendChat(item.prompt); };
+    actions.appendChild(button);
+  }
+  if (actions.children.length) msg.appendChild(actions);
+}
+
+async function requestSuggestions(msg) {
+  const cid = chatId;
+  const history = messages.map(({role, content}) => ({role, content}));
+  const snapshot = JSON.stringify(history);
+  try {
+    const r = await api("/api/chat/suggestions", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({messages: history})});
+    // A newer turn or another chat must never receive this answer's suggestions.
+    if (chatId !== cid || snapshot !== JSON.stringify(messages.map(({role, content}) => ({role, content})))) return;
+    const last = messages.at(-1);
+    last.suggestions = Array.isArray(r.suggestions) ? r.suggestions : [];
+    if (msg.isConnected) renderSuggestions(msg, last.suggestions);
+    else renderConversation();
+    await saveChat();
+  } catch { /* Optional suggestions disappear when the local model is unavailable. */ }
+}
+
 const KINDS = [["email", "Draft follow-up email"], ["message", "Draft message"], ["todo", "Make to-do list"], ["notes", "Summarize as notes"]];
 function draftButtons(src) {
   return KINDS.map(([k, label]) => `<button class="btn" data-kind="${k}" data-src="${src}">${label}</button>`).join("");

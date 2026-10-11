@@ -162,6 +162,12 @@ async def chat(req: Request):
             out = f"SUMMARY: The user is in {app_} looking at {title}.\nTEXT: {title}"
         message = {"role": "assistant", "content": out}
         finish_reason = "stop"
+    elif isinstance(last, str) and "Suggest useful next questions" in str(body.get("messages", [{}])[0].get("content", "")):
+        history = json.loads(last)
+        topic = next((m["content"] for m in reversed(history) if m["role"] == "user"), "this discussion")[:60]
+        out = json.dumps({"suggestions": [{"label": "Explore the next step", "prompt": f"What should I do next about: {topic}?"}]})
+        message = {"role": "assistant", "content": out}
+        finish_reason = "stop"
     elif isinstance(last, str) and "Question:" in last:
         ids = re.findall(r"\[#(\d+)\]", last)[:2]
         out = "Mock answer: this came from " + " and ".join(f"[#{i}]" for i in ids) + "."

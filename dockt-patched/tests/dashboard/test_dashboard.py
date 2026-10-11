@@ -204,25 +204,24 @@ def test_new_chat_resets(dash):
 
 # ---------------------------------------------------------------- drafts, modal, sources
 def test_draft_from_answer(dash):
-    drafts = []
-    dash.page.on("request", lambda r: r.url.endswith("/api/draft") and drafts.append(json.loads(r.post_data)))
+    bodies = chat_bodies(dash)
+    dash.page.route("**/api/chat/suggestions", lambda r: r.fulfill(json={"suggestions": [
+        {"label": "Draft dinner message", "prompt": "Draft a message about the dinner we discussed."}]}))
     dash.open().ask("where is dinner tonight")
-    dash.page.locator("#thread .msg.bot button[data-kind=message]").click()
-    dash.page.wait_for_selector("#thread .msg.bot.draft .copy")
-    assert drafts[0]["ids"] == [int(i) for i in cited(dash)] and drafts[0]["kind"] == "message"
-    assert "where is dinner tonight" in drafts[0]["instruction"]
-    last = dash.js("messages.at(-1)")
-    assert last["role"] == "assistant" and last["draft"] is True
-    draft_srcs = dash.page.locator("#thread .msg.bot.draft .srcs .src").evaluate_all("els => els.map(e => e.dataset.id)")
-    assert draft_srcs == cited(dash), "a draft lists the cited screenshots it was written from"
+    dash.page.locator("#thread .suggestions button").first.click()
+    dash.page.wait_for_function("!busy")
+    assert bodies[-1]["messages"][0]["content"] == "where is dinner tonight"
+    assert bodies[-1]["messages"][-1]["content"] == "Draft a message about the dinner we discussed."
+    assert dash.js("messages.at(-1).role") == "assistant"
 
 
 def test_draft_failure_is_friendly(dash):
     dash.page.route("**/api/draft", lambda r: r.fulfill(status=500, body="boom"))
     dash.open().ask("where is dinner tonight")
-    dash.page.locator("#thread .msg.bot button[data-kind=email]").click()
-    dash.page.wait_for_function("document.querySelector('#thread .msg.bot.draft .text').innerText.includes('Couldn')")
-    assert "boom" not in dash.last_bot_text()
+    dash.page.locator("#thread .cite").first.click()
+    dash.page.locator("#mActions button[data-kind=email]").click()
+    dash.page.wait_for_function("document.querySelector('#draft').innerText.includes('Couldn')")
+    assert "boom" not in dash.page.locator("#draft").inner_text()
 
 
 def test_chip_opens_modal_with_evidence(dash):
@@ -557,8 +556,8 @@ def test_no_horizontal_overflow(browser, dockt, width, height):
     try:
         d = Dash(ctx.new_page(), dockt.base).open()
         d.ask("where is dinner tonight")
-        d.page.locator("#thread .msg.bot button[data-kind=email]").click()
-        d.page.wait_for_selector("#thread .msg.bot.draft .copy")
+        d.page.locator("#thread .suggestions button").first.click()
+        d.page.wait_for_function("!busy")
         assert not d.js("document.documentElement.scrollWidth > innerWidth"), f"horizontal scroll at {width}px"
         assert not d.errors
     finally:
