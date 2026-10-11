@@ -676,6 +676,129 @@ class LayeredWindow:
             self.user32.ReleaseDC(None, screen)
 
 
+AppKit = None
+if sys.platform == "darwin":
+    try:   # pyobjc comes with pywebview on macOS
+        import AppKit
+        import objc
+        from types import SimpleNamespace
+
+        class DocktPetView(AppKit.NSView):
+            """Draws the pet image and hands mouse events to MacPetWindow.on_event."""
+
+            def initWithFrame_(self, frame):
+                self = objc.super(DocktPetView, self).initWithFrame_(frame)
+                if self is not None:
+                    self.image = None
+                    self.handler = None
+                    self.addTrackingArea_(AppKit.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                        self.bounds(), AppKit.NSTrackingMouseEnteredAndExited | AppKit.NSTrackingMouseMoved
+                        | AppKit.NSTrackingActiveAlways | AppKit.NSTrackingInVisibleRect, self, None))
+                return self
+
+            def drawRect_(self, _rect):
+                AppKit.NSColor.clearColor().set()
+                AppKit.NSRectFillUsingOperation(self.bounds(), AppKit.NSCompositingOperationCopy)
+                if self.image is not None:
+                    self.image.drawInRect_(self.bounds())
+
+            def acceptsFirstMouse_(self, _event):
+                return True   # the first click acts even when Dockt isn't the active app
+
+            @objc.python_method
+            def send(self, kind, event):
+                if self.handler is None:
+                    return
+                point = self.convertPoint_fromView_(event.locationInWindow(), None)
+                screen = AppKit.NSEvent.mouseLocation()
+                top = AppKit.NSScreen.screens()[0].frame().size.height   # Tk's y runs down from the main screen's top
+                try:
+                    self.handler(kind, SimpleNamespace(x=point.x, y=self.bounds().size.height - point.y,
+                                                       x_root=round(screen.x), y_root=round(top - screen.y)))
+                except Exception as exc:   # an exception escaping into AppKit would abort the app
+                    print(f"pet {kind} failed: {exc!r}")
+
+            def mouseDown_(self, event):
+                if event.modifierFlags() & AppKit.NSEventModifierFlagControl:
+                    self.send("menu", event)   # control-click is the Mac right-click
+                else:
+                    self.send("press", event)
+
+            def mouseDragged_(self, event):
+                self.send("drag", event)
+
+            def mouseUp_(self, event):
+                if not event.modifierFlags() & AppKit.NSEventModifierFlagControl:
+                    self.send("release", event)
+
+            def rightMouseDown_(self, event):
+                self.send("menu", event)
+
+            def mouseEntered_(self, event):
+                self.send("enter", event)
+
+            def mouseExited_(self, event):
+                self.send("leave", event)
+
+            def mouseMoved_(self, event):
+                self.send("motion", event)
+    except ImportError:
+        AppKit = None
+
+
+class MacPetWindow:
+    """macOS: Tk draws no images on a transparent window, so the pet is shown in a native borderless panel
+    with real per-pixel alpha, laid exactly over the (invisible) Tk pet window, which still owns position,
+    dragging and state. The panel takes the mouse and queues its events in self.events for the pet to run:
+    calling Tk from inside an AppKit callback re-enters Tk's event loop and crashes Python."""
+
+    def __init__(self):
+        if AppKit is None:
+            raise OSError("pyobjc isn't installed")
+        style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
+        self.panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            ((0, 0), (160, 140)), style, AppKit.NSBackingStoreBuffered, False)
+        self.panel.setOpaque_(False)
+        self.panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self.panel.setHasShadow_(False)
+        self.panel.setHidesOnDeactivate_(False)
+        self.panel.setLevel_(19)   # where Tk's -topmost puts windows, so the controls panel can open above it
+        self.panel.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                                          | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
+        self.view = DocktPetView.alloc().initWithFrame_(((0, 0), (160, 140)))
+        self.events: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
+        self.view.handler = lambda kind, event: self.events.put((kind, event))
+        self.panel.setContentView_(self.view)
+        self.scale = 2.0
+
+    def show(self, image: Image.Image, x: int, y: int, width: int, height: int) -> None:
+        """Show an RGBA image (drawn at self.scale) over the Tk window at x, y (Tk screen units)."""
+        buffer = BytesIO()
+        image.save(buffer, "PNG")
+        data = AppKit.NSData.dataWithBytes_length_(buffer.getvalue(), len(buffer.getvalue()))
+        picture = AppKit.NSImage.alloc().initWithData_(data)
+        picture.setSize_((width, height))
+        self.view.image = picture
+        top = AppKit.NSScreen.screens()[0].frame().size.height
+        self.panel.setFrame_display_(((x, top - y - height), (width, height)), True)
+        self.view.setNeedsDisplay_(True)
+        if not self.panel.isVisible():
+            self.panel.orderFrontRegardless()
+
+    def hide(self) -> None:
+        self.panel.orderOut_(None)
+
+    @staticmethod
+    def ignore_tk_window(title: str, width: int, height: int) -> bool:
+        """Let clicks fall through the invisible Tk pet window to this panel."""
+        for window in AppKit.NSApp.windows():
+            size = window.frame().size
+            if window.title() == title and (round(size.width), round(size.height)) == (width, height):
+                window.setIgnoresMouseEvents_(True)
+                return True
+        return False
+
+
 def _keep_topmost(*windows) -> None:
     """Raise these always-on-top windows above other always-on-top windows, in order, without taking focus."""
     user32 = ctypes.windll.user32
@@ -1517,6 +1640,19 @@ class QuickChat:
             except (AttributeError, OSError, tk.TclError, ValueError) as exc:
                 print(f"smooth pet unavailable, drawing it on the canvas: {exc}")
                 self.pet_body = None
+        elif sys.platform == "darwin" and os.environ.get("DOCKT_SMOOTH_PET", "1") != "0":
+            try:
+                self.pet_body = MacPetWindow()
+                self.pet.attributes("-alpha", 0.0)   # the native panel shows the pet; this window keeps its place
+                self.pet.bind("<Configure>", lambda _e: self._draw_pet(), add="+")
+                self.pet.bind("<Map>", lambda _e: self._draw_pet(), add="+")
+                self.pet.bind("<Unmap>", lambda _e: self.pet_body.hide(), add="+")
+                self.pet.bind("<Destroy>", lambda e: self.pet_body.hide() if e.widget is self.pet else None,
+                              add="+")
+                self.pet.after(15, self._poll_mac_pet)
+            except (AttributeError, OSError, tk.TclError, ValueError) as exc:
+                print(f"native pet unavailable, drawing it on the canvas: {exc}")
+                self.pet_body = None
         self._place_pet()
         self._draw_pet()
         self.pet.after(520, self._animate_pet)
@@ -1585,6 +1721,9 @@ class QuickChat:
         try:
             if not self.pet.winfo_ismapped():
                 return True   # hidden pet: nothing to draw, and nothing to fall back to either
+            if isinstance(self.pet_body, MacPetWindow):
+                self._show_mac_pet(frame, size, left, top)
+                return True
             frames = self.__dict__.setdefault("_pet_smooth", {})
             if frame not in frames:
                 mood, blink, squash, look = frame
@@ -1596,22 +1735,14 @@ class QuickChat:
         except (OSError, tk.TclError, ValueError):
             return False
 
-    def _draw_pet_controls(self, canvas):
-        # Render at four times the target resolution, then downsample: Tk canvas
-        # strokes are jagged, especially when Windows scales the desktop.
+    def _pet_controls(self):
+        """The hover controls: voice state, each button as (name, centre x, hovered), and the tooltip
+        as (text, left, width) or None, in the pet's 160 x 140 units."""
         voice = getattr(self, "voice_state", "idle")
-        photos = self.__dict__.setdefault("_control_photos", {})
-        def photo(kind, active=False):
-            key = (kind, active, voice if kind == "mic" else "idle", self.ui_scale)
-            if key not in photos:
-                photos[key] = ImageTk.PhotoImage(
-                    _pet_control_image(*key), master=self.pet)
-            return photos[key]
-        canvas.create_image(26, 110, anchor="nw", image=photo("bar"), tags=("pet-control-bar",))
+        buttons, tooltip = [], None
         for name, center in (("chat", 48), ("mic", 80), ("menu", 112)):
             active = self.pet_hover_button == name
-            canvas.create_image(center - 12, 113, anchor="nw", image=photo(name, active),
-                                tags=("pet-control", f"pet-control-{name}"))
+            buttons.append((name, center, active))
             notice = getattr(self, "pet_notice", "")
             if active or (name == "mic" and notice and not self.pet_hover_button):
                 if name == "chat":
@@ -1627,12 +1758,89 @@ class QuickChat:
                 if notice and not active:
                     title = notice
                 tooltip_width = min(148, 14 + 4.9 * len(title))
-                left = max(6, min(154 - tooltip_width, center - tooltip_width / 2))
-                self._rounded_rect(canvas, left, 89, left + tooltip_width, 106, 8,
-                                   fill="#252824", outline="#454A43", width=1,
-                                   tags=("pet-tooltip",))
-                canvas.create_text(left + tooltip_width / 2, 97.5, text=title,
-                                   fill="#F1F3EE", font=("Segoe UI", 8), tags=("pet-tooltip",))
+                tooltip = (title, max(6, min(154 - tooltip_width, center - tooltip_width / 2)), tooltip_width)
+        return voice, buttons, tooltip
+
+    def _draw_pet_controls(self, canvas):
+        # Render at four times the target resolution, then downsample: Tk canvas
+        # strokes are jagged, especially when Windows scales the desktop.
+        voice, buttons, tooltip = self._pet_controls()
+        photos = self.__dict__.setdefault("_control_photos", {})
+        def photo(kind, active=False):
+            key = (kind, active, voice if kind == "mic" else "idle", self.ui_scale)
+            if key not in photos:
+                photos[key] = ImageTk.PhotoImage(
+                    _pet_control_image(*key), master=self.pet)
+            return photos[key]
+        canvas.create_image(26, 110, anchor="nw", image=photo("bar"), tags=("pet-control-bar",))
+        for name, center, active in buttons:
+            canvas.create_image(center - 12, 113, anchor="nw", image=photo(name, active),
+                                tags=("pet-control", f"pet-control-{name}"))
+        if tooltip:
+            title, left, tooltip_width = tooltip
+            self._rounded_rect(canvas, left, 89, left + tooltip_width, 106, 8,
+                               fill="#252824", outline="#454A43", width=1,
+                               tags=("pet-tooltip",))
+            canvas.create_text(left + tooltip_width / 2, 97.5, text=title,
+                               fill="#F1F3EE", font=("Segoe UI", 8), tags=("pet-tooltip",))
+
+    def _show_mac_pet(self, frame, size, left, top):
+        """macOS: compose the robot, hover controls and tooltip into one image for the native pet panel."""
+        from PIL import ImageDraw, ImageFont
+        k = self.ui_scale * self.pet_body.scale   # pet units -> image pixels (Retina: 2 per point)
+        robots = self.__dict__.setdefault("_pet_mac", {})
+        if frame not in robots:
+            mood, blink, squash, look = frame
+            robots[frame] = _pet_image(round(size * self.pet_body.scale), blink, None, squash, mood, look)
+        image = Image.new("RGBA", (round(160 * k), round(140 * k)))
+        image.alpha_composite(robots[frame], (round(left * k), max(0, round(top * k))))
+        if self.pet_hint_visible:
+            voice, buttons, tooltip = self._pet_controls()
+            image.alpha_composite(_pet_control_image("bar", False, "idle", k), (round(26 * k), round(110 * k)))
+            for name, center, active in buttons:
+                image.alpha_composite(_pet_control_image(name, active, voice if name == "mic" else "idle", k),
+                                      (round((center - 12) * k), round(113 * k)))
+            if tooltip:
+                title, x, width = tooltip
+                draw = ImageDraw.Draw(image)
+                draw.rounded_rectangle((x * k, 89 * k, (x + width) * k, 106 * k), radius=8 * k,
+                                       fill="#252824", outline="#454A43", width=max(1, round(k)))
+                draw.text(((x + width / 2) * k, 97.5 * k), title, fill="#F1F3EE", anchor="mm",
+                          font=ImageFont.truetype("/System/Library/Fonts/HelveticaNeue.ttc", round(9 * k)))
+        width, height = round(160 * self.ui_scale), round(140 * self.ui_scale)
+        self.pet_body.show(image, self.pet.winfo_rootx(), self.pet.winfo_rooty(), width, height)
+        if not getattr(self, "_mac_pet_clicks", False):   # once the Tk window exists, let clicks reach the panel
+            self._mac_pet_clicks = MacPetWindow.ignore_tk_window(self.pet.title(), width, height)
+
+    def _poll_mac_pet(self):
+        """Run the native macOS pet panel's queued mouse events here, on Tk's side."""
+        try:
+            while True:
+                kind, event = self.pet_body.events.get_nowait()
+                self._pet_native_event(kind, event)
+        except queue.Empty:
+            pass
+        try:
+            self.pet.after(15, self._poll_mac_pet)
+        except tk.TclError:
+            pass   # the pet window is gone
+
+    def _pet_native_event(self, kind, event):
+        """Mouse events from the native macOS pet panel, handled as the Tk pet's bindings would."""
+        if kind == "press":
+            self._pet_press(event)
+        elif kind == "drag":
+            self._pet_drag(event)
+        elif kind == "release":
+            self._pet_release(event)
+        elif kind == "menu":
+            self._pet_menu(event)
+        elif kind == "enter":
+            self._pet_hint(True)
+        elif kind == "leave":
+            self._schedule_pet_hint_hide()
+        elif kind == "motion":
+            self._pet_motion(event)
 
     def _pet_button_at(self, x, y):
         x, y = x / self.ui_scale, y / self.ui_scale
@@ -1913,9 +2121,17 @@ class QuickChat:
         panel.update_idletasks()
         width, height = panel.winfo_reqwidth(), panel.winfo_reqheight()
         screen_w, screen_h = panel.winfo_screenwidth(), panel.winfo_screenheight()
-        x = min(x_root, screen_w - width - 8)
-        y = y_root if y_root + height <= screen_h else y_root - height
-        panel.geometry(f"+{max(8, x)}+{max(8, y)}")
+        # Beside the pet, not over it: to the right if it fits on screen, else to the left.
+        gap = 8
+        pet_x, pet_y = self.pet.winfo_rootx(), self.pet.winfo_rooty()
+        pet_w, pet_h = self.pet.winfo_width(), self.pet.winfo_height()
+        x = pet_x + pet_w + gap
+        if x + width > screen_w - 8:
+            x = pet_x - width - gap
+        y = min(max(8, pet_y + pet_h - height), screen_h - height - 8)   # bottom-aligned with the pet
+        panel.geometry(f"+{max(8, x)}+{y}")
+        panel.update_idletasks()
+        panel.attributes("-topmost", True)   # macOS drops -topmost set before the window was first shown
         panel.bind("<Escape>", lambda _event: self._close_options_panel())
         panel.bind("<FocusOut>", self._options_focus_out, add="+")
         panel.focus_force()

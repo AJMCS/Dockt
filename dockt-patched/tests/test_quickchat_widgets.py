@@ -429,7 +429,7 @@ class QuickChatWidgetTests(unittest.TestCase):
 
     def test_pet_body_has_smooth_edges_on_windows(self):
         root, app = self.make_app(96/72)
-        if app.pet_body is None:
+        if quickchat.os.name != "nt" or app.pet_body is None:
             self.skipTest("per-pixel-alpha body needs Windows")
         app.pet.geometry("160x140+10000+10000")
         app.pet.deiconify()
