@@ -1440,6 +1440,12 @@ class QuickChat:
                 self.pet.attributes("-transparentcolor", self.pet_background)
             except tk.TclError:
                 self.pet_background = "#101318"
+        elif sys.platform == "darwin":   # real per-pixel alpha, so the robot's RGBA edges blend
+            try:
+                self.pet.attributes("-transparent", True)
+                self.pet_background = "systemTransparent"
+            except tk.TclError:
+                self.pet_background = "#101318"
         else:
             self.pet_background = "#101318"
         self.pet.configure(bg=self.pet_background)
