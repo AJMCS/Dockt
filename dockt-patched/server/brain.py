@@ -197,9 +197,9 @@ async def ask(req: AskReq):
             "ms": round((time.time() - t0) * 1000)}
 
 
-# ---------- chat (TEAM.md §3.1) — STUB: Lane 3 replaces the body with the tool-calling agent ----------
-# Until then it answers the last user message with ask(), and fakes the stream so Lanes 1 and 2
-# can build against the real event sequence: status* → token* → sources → done | error.
+# ---------- chat agent (TEAM.md §3.1) ----------
+# Multi-turn, tool-calling agent over this laptop's memory.
+# Events (stream): status* → token* → sources → done | error.  Non-stream: the /api/ask shape.
 class ChatMsg(BaseModel):
     role: str
     content: str
@@ -211,31 +211,298 @@ class ChatReq(BaseModel):
     device: str | None = None
 
 
+CHAT_MAX_ROUNDS = int(os.environ.get("CHAT_MAX_ROUNDS", "4"))
+CHAT_MAX_TOKENS = int(os.environ.get("CHAT_MAX_TOKENS", "700"))
+CHAT_HISTORY = int(os.environ.get("CHAT_HISTORY", "8"))  # past messages sent to the model
+TOOL_MAX_CHARS = 6000  # per tool result, keeps a 4-round conversation inside Nemotron's 16k
+
+CHAT_SYSTEM = """You answer questions about what the user saw and did on their own computer screens.
+You cannot see the screens directly: use the tools to look things up before answering.
+- search_screens: find specific facts (names, numbers, places, messages). Leave start/end empty unless the user asks what they saw during a specific period: plans for "tonight" or "Friday" were usually seen earlier. Try a second, different query if the first finds nothing useful.
+- get_activity: what the user worked on / when / for how long.
+- list_commitments: promises, deadlines and requests found on screen.
+- get_captures: re-read captures already cited earlier in the conversation.
+- draft: write an email/message/todo/notes from captures. Return the draft text as your answer.
+Rules:
+- Every fact must cite the capture it came from as [#id] (one id per bracket, e.g. [#3] [#7]), using ONLY ids that appear in tool results.
+- If the tools return nothing relevant, say "I didn't see that on your screens." Never guess.
+- Be concise and specific: names, numbers, times, durations.
+Times are local, written as YYYY-MM-DD HH:MM. Now is {now}."""
+
+_TIME_PARAM = {"type": "string", "description": "local time, YYYY-MM-DD HH:MM"}
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "search_screens",
+        "description": "Search the user's screen history (text and summaries). start/end filter by when the "
+                       "screen was seen; omit them to search everything.",
+        "parameters": {"type": "object", "properties": {
+            "q": {"type": "string", "description": "keywords, e.g. 'dinner reservation'"},
+            "start": _TIME_PARAM, "end": _TIME_PARAM}, "required": ["q"]}}},
+    {"type": "function", "function": {
+        "name": "get_activity",
+        "description": "Timeline of which apps and windows were open between start and end.",
+        "parameters": {"type": "object", "properties": {"start": _TIME_PARAM, "end": _TIME_PARAM},
+                       "required": ["start", "end"]}}},
+    {"type": "function", "function": {
+        "name": "get_captures",
+        "description": "Full text of specific captures by id.",
+        "parameters": {"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["ids"]}}},
+    {"type": "function", "function": {
+        "name": "list_commitments",
+        "description": "Promises, deadlines and requests found on the user's screens.",
+        "parameters": {"type": "object", "properties": {
+            "hours": {"type": "number", "description": "look back this many hours (default 48)"},
+            "include_done": {"type": "boolean"}}}}},
+    {"type": "function", "function": {
+        "name": "draft",
+        "description": "Write a draft from captures. kind: email | message | todo | notes.",
+        "parameters": {"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "integer"}},
+            "kind": {"type": "string", "enum": ["email", "message", "todo", "notes"]},  # = DRAFT_KINDS
+            "instruction": {"type": "string"}}, "required": ["ids", "kind"]}}},
+]
+
+
+def _fmt_full(ts):
+    return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _parse_time(v):
+    """Tool time argument -> unix seconds. Accepts 'YYYY-MM-DD HH:MM', 'HH:MM' (today) or a number."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    v = str(v).strip()
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(v[:19], fmt).timestamp()
+        except ValueError:
+            pass
+    if v.startswith("24:00") or v.endswith(" 24:00"):  # models like "…24:00" for midnight
+        day = v[:10] if len(v) > 5 else dt.date.today().isoformat()
+        return (dt.datetime.strptime(day, "%Y-%m-%d") + dt.timedelta(days=1)).timestamp()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", v)
+    if m:
+        return dt.datetime.now().replace(hour=int(m.group(1)), minute=int(m.group(2)),
+                                         second=0, microsecond=0).timestamp()
+    raise ValueError(f"can't read time {v!r}, use YYYY-MM-DD HH:MM")
+
+
+def _capture_line(r, max_chars=400):
+    text = " ".join((r["ocr"] or "").split())[:max_chars]
+    return f"[#{r['id']}] {_fmt_time(r['ts'])} · {r['app']} — {r['title']}: {r['summary']} | {text}"
+
+
+def _tool_status(name, args):
+    if name == "search_screens":
+        return f"Searching your screens for '{args.get('q', '')}'…"
+    if name == "get_activity":
+        return "Reading your activity log…"
+    if name == "get_captures":
+        return "Opening " + ", ".join(f"#{i}" for i in args.get("ids", [])[:6]) + "…"
+    if name == "list_commitments":
+        return "Checking your commitments…"
+    if name == "draft":
+        return f"Drafting a {args.get('kind', 'draft')}…"
+    return f"Running {name}…"
+
+
+async def _run_tool(name, args, device, sources):
+    """Execute one tool call. Returns compact text for the model; adds every capture it shows to sources."""
+    def keep(rows):
+        for r in rows:
+            sources.setdefault(r["id"], r)
+        return rows
+
+    if name == "search_screens":
+        q = str(args.get("q") or "").strip()
+        if not q:
+            return "error: q is required"
+        rows = keep(_diverse(await memory.search(q, 24, device, _parse_time(args.get("start")),
+                                                 _parse_time(args.get("end"))))[:12])
+        return "\n".join(_capture_line(r) for r in rows) or "No matching captures."
+    if name == "get_activity":
+        start, end = _parse_time(args.get("start")), _parse_time(args.get("end"))
+        if start is None or end is None:
+            return "error: start and end are required"
+        spans, omitted, total = memory.activity(start, end, device, MAX_SPANS)
+        if not spans:
+            return ("No activity captured in that period. If the user asked about a plan or event "
+                    "(dinner, meeting, flight, deadline), call search_screens without start/end.")
+        keep(memory.many([sp["id"] for sp in spans]))
+        return _activity_text(spans, omitted, total)
+    if name == "get_captures":
+        ids = [int(i) for i in (args.get("ids") or [])][:12]
+        rows = keep(memory.many(ids))
+        return "\n\n".join(_capture_line(r, 1500) for r in rows) or "No such captures."
+    if name == "list_commitments":
+        now = time.time()
+        hours = float(args.get("hours") or 48)
+        items = memory.commitments(now - hours * 3600, now + 60, device, bool(args.get("include_done", False)))
+        if not items:
+            return "No commitments found."
+        keep(memory.many(list(dict.fromkeys(c["capture_id"] for c in items))))
+        return "\n".join(f"[#{c['capture_id']}] {_fmt_time(c['ts'])} · {c['kind']} · {c['who']}: {c['text']}"
+                         + (f" (due {c['due']})" if c["due"] else "") + (" [done]" if c["done"] else "")
+                         for c in items[:40])
+    if name == "draft":
+        ids = [int(i) for i in (args.get("ids") or [])][:12]
+        rows = keep(memory.many(ids))
+        if not rows:
+            return "error: draft needs ids of captures returned by an earlier tool call"
+        text = await _draft_text(rows, args.get("kind") or "message", args.get("instruction") or "")
+        refs = " ".join(f"[#{r['id']}]" for r in rows)
+        return f"Draft built from {refs}:\n\n{text}"
+    return f"error: unknown tool {name}"
+
+
+async def _chat_messages(messages, tools=None, max_tokens=700, temperature=0.2):
+    """Non-stream chat_messages per TEAM.md §3.2. Uses Lane 4's models.chat_messages when it exists;
+    TEMPORARY fallback until then: same OpenAI-compatible call through models' client and LLM_URL."""
+    if hasattr(models, "chat_messages"):
+        return await models.chat_messages(messages, tools=tools, max_tokens=max_tokens,
+                                          temperature=temperature, stream=False)
+    body = {"model": models.LLM_MODEL, "messages": messages, "max_tokens": max_tokens,
+            "temperature": temperature, "reasoning_effort": "none"}
+    if tools:
+        body["tools"] = tools
+    r = await models._client.post(f"{models.LLM_URL}/chat/completions", json=body)
+    if r.status_code == 400:  # servers that reject reasoning_effort "none"
+        body.pop("reasoning_effort")
+        r = await models._client.post(f"{models.LLM_URL}/chat/completions", json=body)
+    r.raise_for_status()
+    msg = r.json()["choices"][0]["message"]
+    calls = []
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        fn = tc.get("function") or {}
+        a = fn.get("arguments") or {}
+        if isinstance(a, str):
+            try:
+                a = json.loads(a) if a.strip() else {}
+            except json.JSONDecodeError:
+                a = {}
+        calls.append({"id": tc.get("id") or f"call_{i}", "name": fn.get("name", ""), "arguments": a})
+    return {"content": models._strip_think(msg.get("content") or ""), "tool_calls": calls}
+
+
+def _time_hint(q):
+    start, end, explicit = time_window(q)
+    if not explicit:
+        return ""
+    return (f"\n(Time hint: the period in this question is {_fmt_full(start)} to {_fmt_full(end)}. "
+            f"Plans and events for this period were usually seen earlier: search for them without start/end.)")
+
+
+def _finish(answer, sources):
+    """Normalize [9] -> [#9] for ids we actually returned, drop [#id]s no tool returned,
+    then cited = ids in the answer ∩ sources."""
+    answer = re.sub(r"\[(#?\d+(?:\s*,\s*#?\d+)+)\]",  # [#1, #9] -> [#1] [#9]
+                    lambda m: " ".join(f"[#{x.strip().lstrip('#')}]" for x in m.group(1).split(",")), answer)
+    answer = re.sub(r"\[(\d+)\]", lambda m: f"[#{m.group(1)}]" if int(m.group(1)) in sources else m.group(0),
+                    answer)
+    answer = re.sub(r"\s?\[#(\d+)\]", lambda m: m.group(0) if int(m.group(1)) in sources else "", answer)
+    cited = [i for i in dict.fromkeys(int(x) for x in re.findall(r"\[#(\d+)\]", answer)) if i in sources]
+    ordered = [sources[i] for i in cited] + [r for i, r in sources.items() if i not in cited]
+    return answer, cited, ordered[:max(12, len(cited))]
+
+
+async def _agent(req: ChatReq):
+    """The agent loop as an event stream (dicts). Both /api/chat modes consume it."""
+    t0 = time.time()
+    history = [m for m in req.messages if m.role in ("user", "assistant") and m.content.strip()]
+    if not history or history[-1].role != "user":
+        raise HTTPException(400, "the last message must be from the user")
+    history = history[-CHAT_HISTORY:]
+    msgs = [{"role": "system", "content": CHAT_SYSTEM.format(now=dt.datetime.now().strftime("%A %Y-%m-%d %H:%M"))}]
+    msgs += [{"role": m.role, "content": m.content} for m in history]
+    msgs[-1]["content"] += _time_hint(history[-1].content)
+
+    sources: dict[int, dict] = {}
+    drafted: list[int] = []  # captures a draft was built from; the model tends to drop their citations
+    answer = ""
+    for rnd in range(CHAT_MAX_ROUNDS + 1):
+        last = rnd == CHAT_MAX_ROUNDS
+        if last:  # out of tool rounds: force an answer from what was found
+            msgs.append({"role": "user", "content": "Answer now using only the tool results above."})
+        out = await _chat_messages(msgs, None if last else TOOLS, CHAT_MAX_TOKENS, 0.1)
+        calls = out.get("tool_calls") or []
+        if not calls:
+            answer = (out.get("content") or "").strip()
+            break
+        msgs.append({"role": "assistant", "content": out.get("content") or "", "tool_calls": [
+            {"id": c["id"], "type": "function",
+             "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
+        for c in calls:
+            yield {"type": "status", "text": _tool_status(c["name"], c["arguments"])}
+            try:
+                result = await _run_tool(c["name"], c["arguments"], req.device, sources)
+            except Exception as e:  # a bad argument shouldn't kill the turn; let the model retry
+                result = f"error: {e}"
+            if c["name"] == "draft" and result.startswith("Draft built from"):
+                drafted += [int(i) for i in re.findall(r"\[#(\d+)\]", result.split("\n", 1)[0])]
+            print(f"chat tool {c['name']}({json.dumps(c['arguments'], ensure_ascii=False)}) -> {len(result)} chars")
+            msgs.append({"role": "tool", "tool_call_id": c["id"], "content": result[:TOOL_MAX_CHARS]})
+
+    if not answer:
+        answer = "I didn't see that on your screens."
+    if drafted and not any(f"[#{i}]" in answer for i in drafted):
+        answer += "\n\n" + " ".join(f"[#{i}]" for i in dict.fromkeys(drafted))
+    answer, cited, items = _finish(answer, sources)
+    # the model's answer arrives whole (tool rounds are non-stream); chunk it for the UI
+    for piece in re.findall(r"\S+\s*", answer):
+        yield {"type": "token", "text": piece}
+    yield {"type": "sources", "items": items}
+    yield {"type": "done", "answer": answer, "cited": cited, "ms": round((time.time() - t0) * 1000)}
+
+
 def _sse(obj: dict) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
 @router.post("/api/chat")
 async def chat(req: ChatReq):
-    users = [m.content for m in req.messages if m.role == "user"]
-    if not users:
-        raise HTTPException(400, "no user message")
-    ask_req = AskReq(q=users[-1], device=req.device)
     if not req.stream:
-        return await ask(ask_req)
+        res = {}
+        try:
+            async for ev in _agent(req):
+                if ev["type"] == "sources":
+                    res["sources"] = ev["items"]
+                elif ev["type"] == "done":
+                    res.update(answer=ev["answer"], cited=ev["cited"], ms=ev["ms"])
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, repr(e))
+        return res
+
+    agent = _agent(req)
+    try:  # surface a bad request as HTTP 400 before the stream starts
+        first = await agent.__anext__()
+    except StopAsyncIteration:
+        first = None
+    except HTTPException:
+        raise
+    except Exception as e:
+        first = {"type": "error", "text": repr(e)}
 
     async def gen():
-        yield _sse({"type": "status", "text": "Searching your screens…"})
+        if first is not None:
+            yield _sse(first)
+            if first["type"] == "error":
+                return
         try:
-            r = await ask(ask_req)
+            async for ev in agent:
+                yield _sse(ev)
+                if ev["type"] == "token":
+                    await asyncio.sleep(0.01)
         except Exception as e:
             yield _sse({"type": "error", "text": repr(e)})
-            return
-        for piece in re.findall(r"\S+\s*", r["answer"]):
-            yield _sse({"type": "token", "text": piece})
-            await asyncio.sleep(0.015)
-        yield _sse({"type": "sources", "items": r["sources"]})
-        yield _sse({"type": "done", "answer": r["answer"], "cited": r["cited"], "ms": r.get("ms", 0)})
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -271,11 +538,15 @@ async def draft(req: DraftReq):
     rows = memory.many(req.ids[:12])
     if not rows:
         raise HTTPException(404, "no captures")
-    kind = DRAFT_KINDS.get(req.kind, DRAFT_KINDS["email"])
+    return {"draft": await _draft_text(rows, req.kind, req.instruction), "kind": req.kind}
+
+
+async def _draft_text(rows, kind, instruction=""):
+    """Shared by /api/draft and the chat agent's draft tool."""
     user = f"Screen captures:\n\n{_context(rows, 1500)}\n\n"
-    user += f"Instruction: {req.instruction}" if req.instruction else "Write the draft."
-    text = await models.chat(DRAFT_SYSTEM.format(kind=kind), user, max_tokens=900, temperature=0.4)
-    return {"draft": text, "kind": req.kind}
+    user += f"Instruction: {instruction}" if instruction else "Write the draft."
+    return await models.chat(DRAFT_SYSTEM.format(kind=DRAFT_KINDS.get(kind, DRAFT_KINDS["email"])),
+                             user, max_tokens=900, temperature=0.4)
 
 
 # ---------- things you promised + standup / timesheet ----------
