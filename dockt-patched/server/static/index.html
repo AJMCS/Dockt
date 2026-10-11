@@ -42,7 +42,7 @@
   }
   * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
   ::selection { background: var(--accent-soft); }
-  body { margin: 0; display: flex; min-height: 100vh; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  body { margin: 0; display: flex; height: 100vh; overflow: hidden; background: var(--bg); color: var(--text); font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
   button, select, textarea { font: inherit; color: inherit; }
   /* desktop-app feel: chrome isn't selectable text; content (answers, drafts, screen text) still is */
   #sidebar, .topbar, button, h3, .meta, .kind, .cite, .tlaxis, #sourcesTitle { -webkit-user-select: none; user-select: none; }
@@ -61,21 +61,34 @@
   .sb-new:hover { background: var(--hover); }
   .sb-new .plus { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; flex: none; }
   .sb-new .plus svg { width: 14px; height: 14px; }
-  .sb-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 4px 0 8px; color: var(--muted); font-size: 12px; }
-  .app { flex: 1; min-width: 0; }
-  .topbar { display: none; align-items: center; gap: 10px; padding: 10px 16px; position: sticky; top: 0; z-index: 5; background: var(--bg); }
+  .sb-foot { display: flex; align-items: center; justify-content: flex-end; padding: 8px 4px 0 8px; color: var(--muted); font-size: 12px; }
+  .app { flex: 1; min-width: 0; display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 10px 16px 10px 24px; flex: none; background: var(--bg); }
+  .topbar .mobile-only, .topbar .narrow-only { display: none; }   /* .topbar prefix: must beat .icon / .tab */
+  /* panel buttons, top right (like Claude's artifacts) */
+  .tabs { margin-left: auto; display: flex; gap: 4px; }
+  .tab { display: flex; align-items: center; gap: 7px; padding: 6px 12px; border: 1px solid transparent; border-radius: 10px; background: transparent;
+         font-size: 13.5px; color: var(--muted); cursor: pointer; transition: background .15s, color .15s, border-color .15s; }
+  .tab svg { width: 16px; height: 16px; }
+  .tab:hover { background: var(--hover); color: var(--text); }
+  .tab.on { background: var(--active); color: var(--text); border-color: var(--line); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .count { background: var(--accent-soft); color: var(--cite-text); border-radius: 99px; padding: 0 7px; font-size: 12px; font-weight: 600; line-height: 1.6; }
+  .count:empty { display: none; }
   #scrim { display: none; position: fixed; inset: 0; background: var(--backdrop); z-index: 15; }
   .icon { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border-radius: 10px; }
   .icon svg { width: 17px; height: 17px; }
   .i-sun { display: var(--sun); } .i-moon { display: var(--moon); }
 
   /* layout */
-  main { max-width: 1120px; margin: 0 auto; padding: 28px 28px 64px; }
-  .chatwrap { display: grid; grid-template-columns: minmax(0, 760px) 280px; justify-content: center; gap: 32px; align-items: start; }
+  main { flex: 1; min-height: 0; display: flex; }
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   h3 { margin: 40px 0 12px; font-size: 14px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
 
   /* conversation */
-  #thread { display: flex; flex-direction: column; gap: 26px; max-height: calc(100vh - 250px); overflow-y: auto; padding: 8px 2px 20px; }
+  /* the thread fills the window and scrolls; the composer stays pinned to the bottom; content keeps a 760px reading column */
+  #thread { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 26px;
+            padding: 16px max(24px, calc((100% - 760px) / 2)) 20px; }
   .msg { max-width: 100%; }
   .msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg.user { align-self: flex-end; max-width: 80%; background: var(--surface2); border: 1px solid var(--line); border-radius: 16px; padding: 10px 16px; }
@@ -88,7 +101,7 @@
   .cite:hover { background: var(--accent); color: var(--on-accent); }
 
   /* composer */
-  .searchrow { margin-top: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 24px; box-shadow: var(--shadow);
+  .searchrow { flex: none; width: calc(100% - 48px); max-width: 760px; margin: 0 auto 18px; background: var(--surface); border: 1px solid var(--line); border-radius: 24px; box-shadow: var(--shadow);
                padding: 14px 12px 10px 20px; transition: border-color .15s; }
   .searchrow:focus-within { border-color: var(--accent); }
   #q { display: block; width: 100%; border: 0; background: transparent; outline: none; resize: none; font-size: 16px; line-height: 1.5;
@@ -129,15 +142,26 @@
   .btn:focus-visible, .go:focus-visible, .cite:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .meta { color: var(--muted); font-size: 12px; }
 
-  /* sources + cards */
-  #sourcesPane h3 { margin-top: 8px; }
-  #sources { position: relative; display: flex; flex-direction: column; gap: 8px; max-height: min(380px, calc(100vh - 160px)); overflow-y: auto; padding: 2px; }
+  /* side panel: one view at a time (Sources by default; Promises / Timeline from the top-right buttons) */
+  #pane { width: 300px; flex: none; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line);
+          background: var(--bg); transition: width .2s ease; }
+  body[data-pane="promises"] #pane, body[data-pane="timeline"] #pane { width: 440px; }
+  #pane .view { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  body[data-pane="sources"] #pane [data-view="sources"], body[data-pane="promises"] #pane [data-view="promises"],
+  body[data-pane="timeline"] #pane [data-view="timeline"] { display: flex; }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 12px 10px 8px 16px; }
+  .pane-head h3 { margin: 0; flex: 1; }
+  [data-view="sources"] .pane-close { display: none; }
+  .pane-body { flex: 1; min-height: 0; overflow-y: auto; padding: 2px 14px 18px; }
+  .pane-actions { margin: 0 0 10px; }
+  #tlTitle { margin: 18px 2px 8px; }
   /* compact source rows: thumbnail left, one-line meta, two-line summary */
-  #sources .card { flex: none; display: grid; grid-template-columns: 88px minmax(0, 1fr); border-radius: 12px; }
-  #sources .card img { width: 88px; height: 100%; min-height: 70px; aspect-ratio: auto; border-bottom: 0; border-right: 1px solid var(--line); }
-  #sources .card .body { padding: 7px 10px 8px; }
-  #sources .card .meta { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #sources .card .sum { font-size: 13px; line-height: 1.4; -webkit-line-clamp: 2; margin-top: 2px; }
+  .cards { display: flex; flex-direction: column; gap: 8px; padding: 2px; }
+  .cards .card { flex: none; display: grid; grid-template-columns: 88px minmax(0, 1fr); border-radius: 12px; }
+  .cards .card img { width: 88px; height: 100%; min-height: 70px; aspect-ratio: auto; border-bottom: 0; border-right: 1px solid var(--line); }
+  .cards .card .body { padding: 7px 10px 8px; }
+  .cards .card .meta { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cards .card .sum { font-size: 13px; line-height: 1.4; -webkit-line-clamp: 2; margin-top: 2px; }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; cursor: pointer;
           transition: border-color .15s, box-shadow .15s; }
   .card:hover, .card.cited { border-color: var(--accent); }
@@ -150,9 +174,6 @@
   .empty { color: var(--muted); padding: 28px 16px; text-align: center; font-size: 14px; }
 
   /* things you promised */
-  .todayhead { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
-  .todayhead h3 { flex: 1; }
-  .todayhead .actions { margin: 0 0 8px; }
   #promises { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
   #promises li { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: flex-start; padding: 9px 12px; border-radius: 10px; transition: background .15s; }
   #promises li:hover { background: var(--hover); }
@@ -198,32 +219,42 @@
           animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 0%, 100% { opacity: .25; transform: scale(.75); } 50% { opacity: 1; transform: scale(1); } }
 
-  @media (max-width: 1100px) { .chatwrap { grid-template-columns: minmax(0, 1fr); gap: 8px; } #sources { max-height: 320px; } }
+  /* narrower windows: the panel slides in over the chat instead of sitting beside it */
+  @media (max-width: 1100px) {
+    .topbar .narrow-only { display: flex; }
+    #pane, body[data-pane] #pane { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); z-index: 18;
+             transform: translateX(100%); transition: transform .2s ease; box-shadow: var(--shadow); }
+    body.pane-open #pane { transform: none; }
+    body.pane-open #scrim { display: block; }
+    [data-view="sources"] .pane-close { display: grid; }
+  }
   @media (max-width: 900px) {
     #sidebar { position: fixed; left: 0; top: 0; transform: translateX(-100%); transition: transform .2s ease; box-shadow: var(--shadow); }
     body.sb-open #sidebar { transform: none; }
     body.sb-open #scrim { display: block; }
-    .topbar { display: flex; }
+    .topbar { padding-left: 12px; }
+    .topbar .mobile-only { display: flex; }
+    .topbar .icon.mobile-only { display: grid; }
+    .topbar .local.mobile-only { display: inline-block; }
   }
   @media (max-width: 800px) { #modal .box { grid-template-columns: 1fr; } #modal .side { border-left: 0; border-top: 1px solid var(--line); max-height: none; } #modal { padding: 16px; } }
   @media (max-width: 600px) {
-    main { padding: 12px 16px 48px; }
-    .msg.user { max-width: 90%; } .msg.bot { font-size: 16px; } #thread { max-height: none; }
-    .todayhead h3 { flex-basis: 100%; margin-bottom: 4px; } .todayhead .actions { margin-bottom: 10px; }
+    #thread { padding: 12px 16px 16px; } .searchrow { width: calc(100% - 24px); margin-bottom: 12px; }
+    .msg.user { max-width: 90%; } .msg.bot { font-size: 16px; }
+    .tab span, .topbar .local.mobile-only { display: none; } .tab { padding: 6px 9px; }
     #promises li > .meta { order: 5; margin-left: 28px; } #promises li > .cite { order: 6; }
   }
 </style>
 </head>
 <body>
 <aside id="sidebar">
-  <div class="sb-head"><div class="logo">Dockt<span>.</span></div><div class="local" id="localBadge">● 100% on-device</div></div>
+  <div class="sb-head"><div class="logo">Dockt<span>.</span></div><div class="local" id="localBadge">● Powered by local AI</div></div>
   <button class="sb-new" id="newChat" title="Start a new conversation"><span class="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>New chat</button>
   <div id="history">
     <h3>Recents</h3>
     <ul id="chatList"></ul>
   </div>
   <div class="sb-foot">
-    <span>Stays on this laptop</span>
     <button class="btn icon" id="themeToggle" title="Toggle light/dark" aria-label="Toggle light or dark theme">
       <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
       <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/></svg>
@@ -233,41 +264,52 @@
 <div id="scrim"></div>
 <div class="app">
 <header class="topbar">
-  <button class="btn icon" id="menuBtn" aria-label="Open chats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-  <div class="logo">Dockt<span>.</span></div>
-  <div class="local">● 100% on-device</div>
+  <button class="btn icon mobile-only" id="menuBtn" aria-label="Open chats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  <div class="logo mobile-only">Dockt<span>.</span></div>
+  <div class="local mobile-only">● Powered by local AI</div>
+  <nav class="tabs" aria-label="Panels">
+    <button class="tab narrow-only" data-pane="sources" title="Screenshots behind the answer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 15l4.5-4 4 3.5 3-2.5 5 4"/></svg><span>Sources</span></button>
+    <button class="tab" data-pane="promises" title="Things you promised"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.2l2.4 2.4 4.6-5"/></svg><span>Promises</span><b class="count" id="promCount"></b></button>
+    <button class="tab" data-pane="timeline" title="Your day at a glance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 19V13M10 19V7M15 19v-9M20 19V4"/></svg><span>Timeline</span></button>
+  </nav>
 </header>
 <main>
-  <div class="chatwrap">
-    <section>
-      <div id="thread"></div>
-      <div class="searchrow">
-        <textarea id="q" rows="1" placeholder="Ask anything you saw: where's dinner tonight? find invoice 4471…" autofocus></textarea>
-        <div class="composer-bar">
-          <select id="dev" aria-label="Device"><option value="">All devices</option></select>
-          <button class="go" id="go" title="Send" aria-label="Send">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
-          </button>
-        </div>
+  <section class="chat">
+    <div id="thread"></div>
+    <div class="searchrow">
+      <textarea id="q" rows="1" placeholder="Ask anything you saw: where's dinner tonight? find invoice 4471…" autofocus></textarea>
+      <div class="composer-bar">
+        <select id="dev" aria-label="Device"><option value="">All devices</option></select>
+        <button class="go" id="go" title="Send" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
+        </button>
       </div>
-    </section>
-    <aside id="sourcesPane">
-      <h3 id="sourcesTitle">Sources</h3>
-      <div id="sources"></div>
-    </aside>
-  </div>
-
-  <div class="todayhead">
-    <h3>Things you promised <span class="meta" id="promHint"></span></h3>
-    <div class="actions">
-      <button class="btn" data-standup="standup">Write my standup</button>
-      <button class="btn" data-standup="timesheet">Draft timesheet</button>
     </div>
-  </div>
-  <ul id="promises"><li class="empty">Nothing found yet — it shows up here within a minute of being on screen.</li></ul>
-
-  <h3>Timeline</h3>
-  <div id="timeline"></div>
+  </section>
+  <aside id="pane">
+    <div class="view" data-view="sources">
+      <div class="pane-head"><h3 id="sourcesTitle">Sources</h3><button class="btn icon pane-close" title="Close" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <div class="pane-body"><div class="cards" id="sources"></div></div>
+    </div>
+    <div class="view" data-view="promises">
+      <div class="pane-head"><h3>Things you promised <span class="meta" id="promHint"></span></h3><button class="btn icon pane-close" title="Close" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <div class="pane-body">
+        <div class="actions pane-actions">
+          <button class="btn" data-standup="standup">Write my standup</button>
+          <button class="btn" data-standup="timesheet">Draft timesheet</button>
+        </div>
+        <ul id="promises"><li class="empty">Nothing found yet — it shows up here within a minute of being on screen.</li></ul>
+      </div>
+    </div>
+    <div class="view" data-view="timeline">
+      <div class="pane-head"><h3>Timeline</h3><button class="btn icon pane-close" title="Close" aria-label="Close panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+      <div class="pane-body">
+        <div id="timeline"></div>
+        <h3 id="tlTitle" hidden></h3>
+        <div class="cards" id="tlSources"><div class="empty">Click a bar to see what was on screen then.</div></div>
+      </div>
+    </div>
+  </aside>
 </main>
 </div>
 
@@ -300,11 +342,11 @@ async function api(path, opts) {
 
 // ---------- on-device badge: green while this laptop can reach the GX10 models ----------
 async function refreshHealth() {
-  let label = "● 100% on-device", tip = "Screens and index stay on this laptop; models run on the GX10 in the room.", down = false;
+  let label = "● Powered by local AI", tip = "AI models run locally on the ASUS GX10 in this room, not in the cloud.", down = false;
   try {
     const h = await api("/api/health");
     const bad = Object.entries(h.models).filter(([, ok]) => !ok).map(([k]) => k);
-    if (bad.length) { down = true; label = "● GX10 unreachable"; tip = "Can't reach the GX10 models: " + bad.join(", "); }
+    if (bad.length) { down = true; label = "● Local AI unreachable"; tip = "Can't reach these models on the GX10: " + bad.join(", "); }
   } catch { down = true; label = "● Dockt service offline"; tip = "The local Dockt service isn't responding."; }
   document.querySelectorAll(".local").forEach(b => { b.textContent = label; b.title = tip; b.classList.toggle("down", down); });
 }
@@ -360,7 +402,9 @@ $("#timeline").addEventListener("click", async e => {
   const s = tlSel = +b.dataset.b;
   try {
     const rows = await api(`/api/browse?start=${s}&end=${s + BUCKET}&limit=200${devParam()}`);
-    showSources(rows.reverse(), [], `${fmt(s)} – ${fmt(s + BUCKET)}`);
+    $("#tlTitle").hidden = false;
+    $("#tlTitle").textContent = `${fmt(s)} – ${fmt(s + BUCKET)}`;
+    $("#tlSources").innerHTML = rows.length ? rows.reverse().map(r => card(r)).join("") : `<div class="empty">No screens in this slot.</div>`;
   } catch {}
 });
 
@@ -490,13 +534,33 @@ function newChat() {
   if (busy) return;
   messages = []; chatId = null; chatTs = 0;
   $("#thread").innerHTML = WELCOME;
-  showSources([]); tlSel = null; refreshTimeline(); renderChatList(); closeSidebar();
+  showSources([]); clearTimelineSlot(); renderChatList(); closeSidebar();
   $("#q").focus();
 }
 $("#newChat").onclick = newChat;
 const closeSidebar = () => document.body.classList.remove("sb-open");
+
+// ---------- side panel: Sources by default; Promises / Timeline open from the top-right buttons ----------
+const narrow = () => matchMedia("(max-width: 1100px)").matches;   // panel overlays the chat below this width
+const paneVisible = () => !narrow() || document.body.classList.contains("pane-open");
+function setPane(name, open = true) {
+  document.body.dataset.pane = name;
+  document.body.classList.toggle("pane-open", open && narrow());
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("on", paneVisible() && b.dataset.pane === name && (name !== "sources" || narrow())));
+}
+function closePane() { narrow() ? setPane(document.body.dataset.pane, false) : setPane("sources"); }
+document.querySelectorAll(".tab").forEach(b => b.onclick = () =>
+  b.classList.contains("on") ? closePane() : setPane(b.dataset.pane));
+document.querySelectorAll(".pane-close").forEach(b => b.onclick = closePane);
+function clearTimelineSlot() {
+  tlSel = null;
+  document.querySelectorAll("#timeline .bar.sel").forEach(x => x.classList.remove("sel"));
+  $("#tlTitle").hidden = true;
+  $("#tlSources").innerHTML = `<div class="empty">Click a bar to see what was on screen then.</div>`;
+  refreshTimeline();
+}
 $("#menuBtn").onclick = () => document.body.classList.toggle("sb-open");
-$("#scrim").onclick = closeSidebar;
+$("#scrim").onclick = () => { closeSidebar(); if (narrow()) closePane(); };
 
 // ---------- shared laptop history: dashboard and pet use the same local SQLite store ----------
 const CHATS_KEY = "dockt-chats";
@@ -579,7 +643,8 @@ migrateLocalChats();
 setInterval(refreshChats, 3000);
 window.addEventListener("focus", refreshChats);
 $("#thread").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
-$("#sources").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
+document.querySelectorAll(".cards").forEach(el => el.addEventListener("click", e => {
+  const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); }));
 $("#thread").innerHTML = WELCOME;
 $("#sources").innerHTML = NO_SOURCES;
 
@@ -628,7 +693,9 @@ async function refreshPromises() {
       </li>`).join("");
     r.items.forEach(c => seenPromises.add(c.id));
     promisesLoaded = true;
-    $("#promHint").textContent = `· ${r.items.filter(c => !c.done).length} open`;
+    const open = r.items.filter(c => !c.done).length;
+    $("#promHint").textContent = `· ${open} open`;
+    $("#promCount").textContent = open || "";
   } catch {}
 }
 $("#promises").addEventListener("click", async e => {
@@ -645,7 +712,7 @@ $("#promises").addEventListener("click", async e => {
 document.addEventListener("click", async e => {
   const b = e.target.closest("button[data-standup]"); if (!b || busy) return;
   const ask = b.textContent;
-  window.scrollTo({top: 0, behavior: "smooth"});
+  if (narrow()) closePane();
   bubble("user", esc(ask));
   const box = bubble("bot draft", `<span class="hint"><span class="spin"></span> Reading today's activity log on-device…</span>`).querySelector(".text");
   busy = $("#go").disabled = true;
@@ -697,6 +764,7 @@ async function route() {
   history.replaceState(null, "", location.pathname);   // so the same link works twice and a reload doesn't re-ask
 }
 window.addEventListener("hashchange", route);
+setPane("sources", false);   // narrow windows start with the panel closed
 route();
 
 // ---------- theme ----------
@@ -712,7 +780,7 @@ $("#thread").addEventListener("mouseover", e => {
   const c = e.target.closest(".cite");
   document.querySelectorAll("#sources .card.hl").forEach(x => x.classList.remove("hl"));
   const card = c && $(`#sources .card[data-id="${c.dataset.id}"]`);
-  if (card) { card.classList.add("hl"); $("#sources").scrollTo({top: card.offsetTop - 2, behavior: "smooth"}); }
+  if (card) { card.classList.add("hl"); if (paneVisible()) card.scrollIntoView({block: "nearest", behavior: "smooth"}); }
 });
 
 // ---------- loop ----------

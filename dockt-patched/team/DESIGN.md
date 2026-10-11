@@ -68,7 +68,7 @@ Corners are soft, borders are 1px `--line`, and shadow is used only on things th
 | Cards, draft box, timeline panel | 14px | No shadow; border turns green on hover |
 | Buttons, list rows | 10px | 6px × 12px padding |
 | Citation chip | 6px | 0 × 6px padding |
-| Pills (status, "100% on-device") | 99px | 1px border |
+| Pills (status, "Powered by local AI") | 99px | 1px border |
 | Send button | Circle, 36px | Solid green |
 
 - **Shadow** (light): `0 1px 2px rgba(31,30,29,.04), 0 6px 20px rgba(31,30,29,.07)`. Dark: `0 1px 2px rgba(0,0,0,.25), 0 8px 24px rgba(0,0,0,.25)`. Used only on the composer, modals and popups.
@@ -79,6 +79,7 @@ Corners are soft, borders are 1px `--line`, and shadow is used only on things th
 
 The quick-chat popup needs four of these: composer, answer text, citation chip and loader. Copy them as they are.
 
+- **Layout.** The chat fills the window and scrolls, with the composer pinned to the bottom of a 760px reading column. Panels open from buttons at the top right, like Claude's artifacts: **Promises** (with the open count) and **Timeline**. The right panel shows Sources by default and widens from 300px to 440px when a panel is open. A second click or the × returns it to Sources. Below 1100px wide, the panel slides in over the chat, and a Sources button appears.
 - **Composer.** A rounded box (`--surface`, 24px radius, shadow) with a textarea that grows up to 160px, and a 36px round green send button with an up-arrow icon at the bottom right. Enter sends, Shift+Enter adds a new line. Placeholder: "Ask anything you saw…".
 - **Answer text.** Serif, 17px, no bubble around it. The user's own message sits right-aligned in a `--surface2` bubble.
 - **Citation chip.** Every `[#9]`, `#9` or `[9]` in an answer becomes `#9`: semibold 13px sans, `--accent-soft` background, 6px radius. Text color `#3F6212` in light mode (darker than `--accent-text`, because the green background lowers contrast) and `#A3E635` in dark mode. On hover it turns solid green with dark text. Only create a chip if that id is in the answer's `sources`. Otherwise leave the text alone, because "invoice #4471" is not a capture.
@@ -86,12 +87,12 @@ The quick-chat popup needs four of these: composer, answer text, citation chip a
 - **Buttons.** Ghost style: transparent, 1px `--line` border, 10px radius, `--hover` background on hover. Icon-only buttons drop the border.
 - **Source card.** A compact row, 12px radius: an 88px-wide thumbnail (cropped from the top) on the left; on the right `#id · time · device`, then app — title (one muted 11.5px line each), then a 2-line serif summary. A cited card gets a green border.
 - **Kind pills** (promises list): `promise` is muted, `deadline` is `--warn-text`, `request` is `--info-text`. 11px, outlined, fully rounded.
-- **"100% on-device" badge.** 12px green text in an outlined green pill, with a ● dot.
+- **"Powered by local AI" badge.** 12px green text in an outlined green pill, with a ● dot. It turns red and reads "Local AI unreachable" when the GX10 models don't answer.
 - **Motion.** 0.15s transitions on hover and color only. One exception: a newly found promise row flashes `--accent-soft` for 1.2s.
 
 ## Voice and states
 
-Write like a calm colleague: short, plain and specific. Sentence case everywhere. Say "on-device" or "on this laptop" to stress privacy, never "cloud" or "server".
+Write like a calm colleague: short, plain and specific. Sentence case everywhere. Say "local AI" to stress privacy: the models run on hardware in the room, not in the cloud. Don't claim data never leaves the laptop: screenshots go to the GX10 to be read. Avoid jargon like "server" or "endpoint".
 
 | Situation | Copy the dashboard uses |
 | --- | --- |
@@ -101,7 +102,6 @@ Write like a calm colleague: short, plain and specific. Sentence case everywhere
 | Nothing indexed | "No screens captured yet." |
 | No promises yet | "Nothing found yet — it shows up here within a minute of being on screen." |
 | Drafting | "Drafting on-device…" |
-| Footer / tray tooltip | "Stays on this laptop" |
 
 - Never show an error's raw text, HTTP status or stack trace. Log it to the console and show one sentence.
 - Each failure tells the user one thing they can do ("try again", "check the GX10").
