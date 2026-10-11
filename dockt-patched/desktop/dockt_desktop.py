@@ -26,6 +26,7 @@ data directory's conversations.db; the theme persists in ~/.dockt/webview.
 """
 import argparse
 import atexit
+import importlib.util
 import json
 import os
 import socket
@@ -44,7 +45,8 @@ LOGS = HOME / "logs"
 PORT = int(os.environ.get("DOCKT_PORT", "8000"))   # resolve_port() may change it
 BASE = f"http://127.0.0.1:{PORT}"
 CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
-TUNNEL_PORT = int(os.environ.get("DOCKT_TUNNEL_PORT", "11435"))   # local end of the SSH tunnel to Ollama
+TUNNEL_PORT = int(os.environ.get("DOCKT_TUNNEL_PORT", "11435"))
+WHISPER_PORT = 8001   # tools/whisper_server.py: where server/models.py's default STT_URL points   # local end of the SSH tunnel to Ollama
 ICON = Path(__file__).with_name("dockt.ico")
 
 children: list[subprocess.Popen] = []
@@ -167,6 +169,7 @@ def model_env(mock: bool) -> dict:
     env = dict(os.environ)
     if mock:
         env["VLM_URL"] = "http://127.0.0.1:9000/v1"
+        env.setdefault("STT_URL", "http://127.0.0.1:9000/v1")   # the mock answers voice input too
         return env
     gx10 = gx10_address(env)
     if gx10 and "VLM_URL" not in env:   # same defaults as Lane 1's start-dockt.bat (team/lane1.md P0-b)
@@ -222,10 +225,22 @@ def start_backend(mock: bool, capture: bool) -> subprocess.Popen | None:
         return None
     if mock and not answers("http://127.0.0.1:9000/v1/models"):
         spawn("mock_models", ["-m", "uvicorn", "--app-dir", "tools", "mock_models:app", "--port", "9000"], env)
+    start_whisper(mock, env)
     server = spawn("server", ["server/app.py"], env)
     if capture:
         spawn("capture", ["agent/capture.py", "--server", BASE, "--name", socket.gethostname()], env)
     return server
+
+
+def start_whisper(mock: bool, env: dict) -> subprocess.Popen | None:
+    """Voice input's speech-to-text, on this laptop's CPU (tools/whisper_server.py). Skipped with --mock, when
+    STT_URL points somewhere else (e.g. a Whisper server on the GX10), or if faster-whisper isn't installed."""
+    if mock or "STT_URL" in os.environ or listening(WHISPER_PORT) or not importlib.util.find_spec("faster_whisper"):
+        return None
+    # English skips language detection: about half the time per question (2.0 s vs 4.0 s for "small" here)
+    return spawn("whisper", ["-m", "uvicorn", "--app-dir", "tools", "whisper_server:app",
+                             "--host", "127.0.0.1", "--port", str(WHISPER_PORT)],
+                 {"WHISPER_LANGUAGE": "en", **env})
 
 
 def start_quickchat() -> subprocess.Popen:

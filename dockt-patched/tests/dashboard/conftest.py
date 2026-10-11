@@ -71,8 +71,9 @@ def dockt(tmp_path_factory):
     # pin everything the stack depends on: other test modules (e.g. tests/test_dashboard_flow.py) change
     # os.environ at import time, and the promises tests need the extractor on
     env = {**os.environ, "DATA_DIR": str(data), "VLM_URL": f"http://127.0.0.1:{mock_port}/v1",
+           "STT_URL": f"http://127.0.0.1:{mock_port}/v1",   # the mock's Whisper endpoint (voice input)
            "DOCKT_PORT": str(port), "DOCKT_HOST": "127.0.0.1", "EXTRACT_ENABLED": "1"}
-    for k in ("EMBED_URL", "LLM_URL", "VLM_MODEL", "LLM_MODEL", "EMBED_MODEL", "DOCKT_TOKEN"):
+    for k in ("EMBED_URL", "LLM_URL", "VLM_MODEL", "LLM_MODEL", "EMBED_MODEL", "STT_MODEL", "DOCKT_TOKEN"):
         env.pop(k, None)
     procs = []
 

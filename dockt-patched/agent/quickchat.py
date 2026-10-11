@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 import customtkinter as ctk
@@ -282,6 +283,81 @@ def poll_pet_status(events: queue.Queue, stop: threading.Event) -> None:
         # One missed poll is often just the service starting up; two in a row means it's down.
         events.put(("pet-status", {"service_ok": failures < 2, "models_ok": models_ok,
                                    "reading": reading}))
+
+
+class VoiceError(Exception):
+    """A voice-input failure: `short` fits under the pet, the message itself goes in the quick chat."""
+
+    def __init__(self, short: str, message: str):
+        super().__init__(message)
+        self.short = short
+
+
+class MicRecorder:
+    """Records the default microphone with Windows' built-in MCI audio API, so voice input needs no extra
+    package. Records 16 kHz mono 16-bit WAV, the format Whisper servers expect."""
+    ALIAS = "dockt_mic"
+
+    def __init__(self, winmm=None):
+        self.winmm = winmm or ctypes.windll.winmm
+
+    def _send(self, command: str) -> str:
+        buffer = ctypes.create_unicode_buffer(256)
+        error = self.winmm.mciSendStringW(command, buffer, 255, None)
+        if error:
+            message = ctypes.create_unicode_buffer(256)
+            self.winmm.mciGetErrorStringW(error, message, 255)
+            raise OSError(message.value or f"MCI error {error}")
+        return buffer.value
+
+    def start(self):
+        self.cancel()   # a recording left open by a crash would block the alias
+        self._send(f"open new type waveaudio alias {self.ALIAS}")
+        try:
+            self._send(f"set {self.ALIAS} time format ms bitspersample 16 channels 1 samplespersec 16000 "
+                       "bytespersec 32000 alignment 2")
+            self._send(f"record {self.ALIAS}")
+        except OSError:
+            self.cancel()
+            raise
+
+    def stop(self) -> bytes:
+        path = Path(tempfile.gettempdir()) / f"dockt-voice-{uuid.uuid4().hex}.wav"
+        try:
+            self._send(f"stop {self.ALIAS}")
+            self._send(f'save {self.ALIAS} "{path}"')
+            return path.read_bytes()
+        finally:
+            self.cancel()
+            path.unlink(missing_ok=True)
+
+    def cancel(self):
+        try:
+            self._send(f"close {self.ALIAS}")
+        except OSError:
+            pass
+
+
+def transcribe_audio(wav: bytes) -> str:
+    """POST a WAV to the local service's /api/transcribe (Whisper at STT_URL) and return the text."""
+    boundary = uuid.uuid4().hex
+    body = (f'--{boundary}\r\nContent-Disposition: form-data; name="audio"; filename="speech.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n").encode() + wav + f"\r\n--{boundary}--\r\n".encode()
+    req = Request(BASE_URL + "/api/transcribe", data=body, method="POST",
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urlopen(req, timeout=60) as response:
+            return (json.loads(response.read().decode("utf-8")).get("text") or "").strip()
+    except HTTPError as exc:
+        if exc.code == 503:   # server/app.py: models.transcribe isn't configured
+            raise VoiceError("Voice isn't set up", "Voice input isn't set up on this Dockt yet.") from exc
+        raise VoiceError("Couldn't transcribe", "Couldn't transcribe that. Try again.") from exc
+    except (URLError, TimeoutError, OSError, ValueError) as exc:
+        raise VoiceError("Dockt is offline",
+                         "Can't reach Dockt on this laptop. Start the Dockt service and try again.") from exc
+
+
+VOICE_LIMIT_MS = 60000
 
 
 def load_conversation(conversation_id: str) -> dict | None:
@@ -1054,6 +1130,10 @@ class QuickChat:
         self.pet_hint_visible = False
         self.pet_hover_button = None
         self._hint_hide_job = None
+        self.voice_state = "idle"   # idle -> recording -> transcribing -> idle
+        self.recorder = None
+        self.pet_notice = ""
+        self._notice_job = self._voice_limit_job = None
         self.options_panel = None
         self._place_pet()
         self._draw_pet()
@@ -1103,10 +1183,13 @@ class QuickChat:
     def _draw_pet_controls(self, canvas):
         self._rounded_rect(canvas, 43, 110, 117, 138, 12, fill="#252824",
                            outline="#454A43", width=1, tags=("pet-control-bar",))
-        for name, center in (("chat", 64), ("menu", 96)):
+        voice = getattr(self, "voice_state", "idle")
+        for name, center in (("chat", 64), ("mic", 96)):
             active = self.pet_hover_button == name
             fill = "#555A53" if active else "#252824"
-            outline = "#555A53" if active else "#252824"
+            if name == "mic" and voice == "recording":
+                fill = "#EF4444" if active else "#DC2626"
+            outline = fill
             self._rounded_rect(
                 canvas, center - 12, 113, center + 12, 135, 6,
                 fill=fill, outline=outline, width=1.2,
@@ -1118,15 +1201,27 @@ class QuickChat:
                 canvas.create_line(center - 2, 127, center - 3, 130, center + 1, 127,
                                    fill="#F1F3EE", width=1.5,
                                    tags=("pet-control", f"pet-control-{name}"))
-            else:
-                for y in (120, 124, 128):
-                    canvas.create_oval(center - 1.5, y - 1.5, center + 1.5, y + 1.5,
-                                       fill="#F1F3EE", outline="",
-                                       tags=("pet-control", f"pet-control-{name}"))
+            elif voice == "recording":   # stop square
+                canvas.create_rectangle(center - 4, 120, center + 4, 128, fill="#FFFFFF", outline="",
+                                        tags=("pet-control", f"pet-control-{name}"))
+            else:                        # microphone, dimmed while transcribing
+                ink = "#8A8F87" if voice == "transcribing" else "#F1F3EE"
+                tags = ("pet-control", f"pet-control-{name}")
+                self._rounded_rect(canvas, center - 3, 117, center + 3, 126, 3, fill="", outline=ink,
+                                   width=1.5, tags=tags)
+                canvas.create_arc(center - 6, 118, center + 6, 130, start=180, extent=180, style="arc",
+                                  outline=ink, width=1.5, tags=tags)
+                canvas.create_line(center, 130, center, 133, fill=ink, width=1.5, tags=tags)
 
-            if active:
-                title = "Open quick chat" if name == "chat" else "More options"
-                tooltip_width = 82 if name == "chat" else 68
+            notice = getattr(self, "pet_notice", "")
+            if active or (name == "mic" and notice):
+                if name == "chat":
+                    title = "Open quick chat"
+                elif active and voice in ("idle", "recording"):   # hovering says what a click does
+                    title = "Stop and transcribe" if voice == "recording" else "Ask by voice"
+                else:
+                    title = notice or "Transcribing…"
+                tooltip_width = min(148, 14 + 4.9 * len(title))
                 left = max(6, min(154 - tooltip_width, center - tooltip_width / 2))
                 self._rounded_rect(canvas, left, 89, left + tooltip_width, 106, 8,
                                    fill="#252824", outline="#454A43", width=1,
@@ -1140,7 +1235,7 @@ class QuickChat:
         if 52 <= x <= 76 and 112 <= y <= 136:
             return "chat"
         if 84 <= x <= 108 and 112 <= y <= 136:
-            return "menu"
+            return "mic"
         return None
 
     def _pet_motion(self, event):
@@ -1181,6 +1276,8 @@ class QuickChat:
             except tk.TclError:
                 pass
             self._hint_hide_job = None
+        if not visible and getattr(self, "voice_state", "idle") != "idle":
+            visible = True   # keep the red stop button (and its status) on screen while voice is busy
         self.pet_hint_visible = visible
         if not visible:
             self.pet_hover_button = None
@@ -1212,8 +1309,79 @@ class QuickChat:
         button = self._pet_button_at(_event.x, _event.y)
         if button == "chat":
             self.show()
-        elif button == "menu":
-            self._pet_menu(_event)
+        elif button == "mic":
+            self._toggle_voice()   # the options menu is on right-click
+
+    def _pet_say(self, text: str, ms: int | None = None):
+        """A short status under the pet (where tooltips go): "Listening…", "Voice isn't set up"…"""
+        if self._notice_job is not None:
+            self.root.after_cancel(self._notice_job)
+            self._notice_job = None
+        self.pet_notice = text
+        if text and ms:
+            self._notice_job = self.root.after(ms, lambda: self._pet_say(""))
+        self._pet_hint(bool(text) or self.pet_hover_button is not None)
+
+    def _toggle_voice(self):
+        if self.voice_state == "idle":
+            self._start_voice()
+        elif self.voice_state == "recording":
+            self._stop_voice()
+
+    def _start_voice(self):
+        if os.name != "nt":
+            self._pet_say("Voice needs Windows", 3000)
+            return
+        try:
+            recorder = MicRecorder()
+            recorder.start()
+        except (OSError, AttributeError) as exc:
+            self.status.set(f"Couldn't open the microphone ({exc}). Check Windows' microphone privacy settings.")
+            self._pet_say("Mic not available", 4000)
+            return
+        self.recorder, self.voice_state = recorder, "recording"
+        self._voice_limit_job = self.root.after(VOICE_LIMIT_MS, self._stop_voice)
+        self._pet_say("Listening…")
+
+    def _stop_voice(self):
+        if self.voice_state != "recording" or self.recorder is None:
+            return
+        if self._voice_limit_job is not None:
+            self.root.after_cancel(self._voice_limit_job)
+            self._voice_limit_job = None
+        recorder, self.recorder = self.recorder, None
+        try:
+            wav = recorder.stop()
+        except OSError as exc:
+            self.voice_state = "idle"
+            self.status.set(f"Couldn't save the recording ({exc}).")
+            self._pet_say("Mic not available", 4000)
+            return
+        self.voice_state = "transcribing"
+        self._pet_say("Transcribing…")
+
+        def work():
+            try:
+                self.events.put(("voice-text", transcribe_audio(wav)))
+            except VoiceError as exc:
+                self.events.put(("voice-error", exc))
+
+        threading.Thread(target=work, name="dockt-voice", daemon=True).start()
+
+    def _voice_done(self, text: str):
+        """Put the words in the quick chat's box (not sent, so a misheard word can be fixed) and open it."""
+        self.voice_state = "idle"
+        if not text:
+            self._pet_say("Didn't catch that", 3000)
+            return
+        self._pet_say("")
+        self.show()
+        self._clear_composer_placeholder()
+        current = self.entry.get("1.0", "end-1c")
+        self.entry.insert("end", (" " if current.strip() and not current.endswith(" ") else "") + text)
+        self._resize_composer()
+        self.status.set("Press Enter to send")
+        self.chat.after(120, self._focus_entry)
 
     def _pet_menu(self, event):
         self._pet_hint(False)
@@ -1589,6 +1757,12 @@ class QuickChat:
                 kind, value = self.events.get_nowait()
                 if kind == "toggle":
                     self.toggle()
+                elif kind == "voice-text":
+                    self._voice_done(value)
+                elif kind == "voice-error":
+                    self.voice_state = "idle"
+                    self.status.set(str(value))
+                    self._pet_say(value.short, 4000)
                 elif kind == "pet-status":
                     self.pet_status = value
                     mood = self._pet_mood()
@@ -1641,6 +1815,8 @@ class QuickChat:
         self.root.after(80, self._drain_events)
 
     def close(self):
+        if getattr(self, "recorder", None) is not None:
+            self.recorder.cancel()   # release the microphone
         if getattr(self, "_status_stop", None) is not None:
             self._status_stop.set()
         if self.hotkey:

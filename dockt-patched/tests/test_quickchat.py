@@ -578,3 +578,79 @@ class QuickChatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VoiceInputTests(unittest.TestCase):
+    """The pet's mic button: MCI recording and the upload to /api/transcribe."""
+
+    class FakeWinmm:
+        """Stands in for ctypes.windll.winmm: logs MCI commands; `save` writes a WAV where asked."""
+
+        def __init__(self, fail_on=None):
+            self.commands, self.fail_on = [], fail_on
+
+        def mciSendStringW(self, command, _buffer, _size, _hwnd):
+            self.commands.append(command)
+            if self.fail_on and command.startswith(self.fail_on):
+                return 328   # an MCI error code
+            if command.startswith("save "):
+                Path(command.split('"')[1]).write_bytes(b"RIFF-fake-wav")
+            if command.startswith("close ") and len(self.commands) == 1:
+                return 263   # nothing open yet: the first, defensive close fails like the real API
+            return 0
+
+        def mciGetErrorStringW(self, _code, buffer, _size):
+            buffer.value = "The device is not ready."
+            return 1
+
+    def test_recorder_records_16k_mono_wav_and_cleans_up(self):
+        winmm = self.FakeWinmm()
+        recorder = quickchat.MicRecorder(winmm)
+        recorder.start()
+        self.assertIn("open new type waveaudio alias dockt_mic", winmm.commands)
+        self.assertTrue(any("bitspersample 16 channels 1 samplespersec 16000" in c for c in winmm.commands))
+        self.assertEqual(winmm.commands[-1], "record dockt_mic")
+        self.assertEqual(recorder.stop(), b"RIFF-fake-wav")
+        saved = Path(next(c for c in winmm.commands if c.startswith("save ")).split('"')[1])
+        self.assertFalse(saved.exists(), "the temp WAV is deleted after reading")
+        self.assertEqual(winmm.commands[-1], "close dockt_mic", "the microphone is released")
+
+    def test_recorder_start_failure_releases_the_device(self):
+        winmm = self.FakeWinmm(fail_on="record")
+        with self.assertRaisesRegex(OSError, "not ready"):
+            quickchat.MicRecorder(winmm).start()
+        self.assertEqual(winmm.commands[-1], "close dockt_mic")
+
+    def test_transcribe_audio_posts_a_wav_upload(self):
+        sent = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"text": "  where is dinner tonight  ", "ms": 812}'
+
+        def fake_urlopen(request, timeout):
+            sent.update(url=request.full_url, body=request.data, type=request.get_header("Content-type"))
+            return Response()
+
+        with patch.object(quickchat, "urlopen", fake_urlopen):
+            self.assertEqual(quickchat.transcribe_audio(b"RIFFwav"), "where is dinner tonight")
+        self.assertTrue(sent["url"].endswith("/api/transcribe"))
+        self.assertTrue(sent["type"].startswith("multipart/form-data; boundary="))
+        self.assertIn(b'name="audio"; filename="speech.wav"', sent["body"])
+        self.assertIn(b"Content-Type: audio/wav\r\n\r\nRIFFwav\r\n", sent["body"])
+
+    def test_transcribe_audio_errors_are_friendly(self):
+        not_configured = HTTPError("u", 503, "Service Unavailable", {}, None)
+        for error, short in ((not_configured, "Voice isn't set up"),
+                             (HTTPError("u", 500, "err", {}, None), "Couldn't transcribe"),
+                             (OSError("refused"), "Dockt is offline")):
+            with self.subTest(short=short), patch.object(quickchat, "urlopen", side_effect=error):
+                with self.assertRaises(quickchat.VoiceError) as caught:
+                    quickchat.transcribe_audio(b"RIFF")
+                self.assertEqual(caught.exception.short, short)

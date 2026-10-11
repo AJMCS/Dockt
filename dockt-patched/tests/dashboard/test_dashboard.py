@@ -687,3 +687,98 @@ def test_phone_sidebar_toggle_closes_drawer(dash):
     dash.page.wait_for_timeout(300)
     assert dash.page.locator("#sidebar").bounding_box()["x"] < 0
     assert not dash.js("document.documentElement.classList.contains('sb-collapsed')"), "phones never collapse to a rail"
+
+
+# ---------- voice input ----------
+# Replaces the microphone before the page loads. Recording yields a real 8 kHz WAV of silence, so the page's
+# decode-and-resample path runs for real; the upload then goes through server/app.py to the mock Whisper.
+MIC_STUB = """
+(() => {
+  window.__mic = {tracksStopped: 0, deny: false, uploads: []};
+  const realFetch = window.fetch;   // note what the page uploads (Playwright can't read Blob multipart bodies)
+  window.fetch = (url, opts) => {
+    const file = opts && opts.body instanceof FormData && opts.body.get("audio");
+    if (file) window.__mic.uploads.push({url: String(url), name: file.name, type: file.type, size: file.size});
+    return realFetch(url, opts);
+  };
+  function silentWav() {
+    const n = 2000, view = new DataView(new ArrayBuffer(44 + n * 2));
+    const ascii = (at, s) => [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+    ascii(0, "RIFF"); view.setUint32(4, 36 + n * 2, true); ascii(8, "WAVEfmt ");
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    ascii(36, "data"); view.setUint32(40, n * 2, true);
+    return new Blob([view], {type: "audio/wav"});
+  }
+  const track = {stop() { window.__mic.tracksStopped++; }};
+  navigator.mediaDevices.getUserMedia = async () => {
+    if (window.__mic.deny) throw new DOMException("denied", "NotAllowedError");
+    return {getTracks: () => [track]};
+  };
+  window.MediaRecorder = class {
+    constructor(stream) { this.stream = stream; this.state = "inactive"; this.mimeType = "audio/wav"; }
+    start() { this.state = "recording"; }
+    stop() {
+      this.state = "inactive";
+      setTimeout(() => { this.ondataavailable && this.ondataavailable({data: silentWav()}); this.onstop && this.onstop(); }, 10);
+    }
+  };
+})();
+"""
+RECORDING = "document.querySelector('#mic').classList.contains('recording')"
+
+
+def test_voice_input_transcribes_into_the_box_without_sending(dash):
+    dash.page.add_init_script(MIC_STUB)
+    dash.open()
+    dash.page.fill("#q", "where is")
+    dash.page.click("#mic")
+    dash.page.wait_for_function(RECORDING)
+    assert dash.page.get_attribute("#mic", "aria-pressed") == "true"
+    assert "Listening" in dash.page.get_attribute("#q", "placeholder")
+    dash.page.click("#mic")
+    dash.page.wait_for_function("document.querySelector('#q').value.includes('mock transcript')")
+    assert dash.page.input_value("#q") == "where is mock transcript"
+    assert dash.js("__mic.tracksStopped") == 1, "the mic must be released after recording"
+    assert dash.page.get_attribute("#mic", "aria-pressed") == "false" and dash.page.is_enabled("#mic")
+    [upload] = dash.js("__mic.uploads")
+    assert upload["url"] == "/api/transcribe" and upload["name"] == "speech.wav" and upload["type"] == "audio/wav"
+    assert upload["size"] == 44 + 4000 * 2, "0.25 s resampled to 16 kHz mono 16-bit WAV"
+    assert dash.js("messages.length") == 0, "voice input fills the box so a misheard word can be fixed; it doesn't send"
+
+
+def test_voice_input_escape_cancels_without_uploading(dash):
+    dash.page.add_init_script(MIC_STUB)
+    uploads = []
+    dash.page.on("request", lambda r: r.url.endswith("/api/transcribe") and uploads.append(r.url))
+    dash.open()
+    dash.page.click("#mic")
+    dash.page.wait_for_function(RECORDING)
+    dash.page.keyboard.press("Escape")
+    dash.page.wait_for_function(f"!({RECORDING}) && __mic.tracksStopped === 1")
+    dash.page.wait_for_timeout(200)
+    assert uploads == [] and dash.page.input_value("#q") == ""
+    assert "Ask anything" in dash.page.get_attribute("#q", "placeholder")
+
+
+@pytest.mark.parametrize("failure", ["mic_denied", "not_configured", "server_error"])
+def test_voice_input_failures_are_friendly(dash, failure):
+    dash.page.add_init_script(MIC_STUB)
+    if failure == "not_configured":   # what server/app.py answers when models.transcribe is missing
+        dash.page.route("**/api/transcribe", lambda r: r.fulfill(
+            status=503, content_type="application/json",
+            body=json.dumps({"detail": "transcription not configured yet (models.transcribe missing)"})))
+    elif failure == "server_error":   # e.g. STT_URL points at a Whisper server that isn't running
+        dash.page.route("**/api/transcribe", lambda r: r.fulfill(status=500, body="Internal Server Error"))
+    dash.open()
+    if failure == "mic_denied":
+        dash.js("__mic.deny = true")
+    dash.page.click("#mic")
+    if failure != "mic_denied":
+        dash.page.wait_for_function(RECORDING)
+        dash.page.click("#mic")
+    expected = {"mic_denied": "Microphone blocked", "not_configured": "isn't set up",
+                "server_error": "Couldn't transcribe"}[failure]
+    dash.page.wait_for_function(f"document.querySelector('#q').placeholder.includes({json.dumps(expected)})")
+    assert dash.page.input_value("#q") == "" and dash.page.is_enabled("#mic")
+    assert "Error" not in dash.page.get_attribute("#q", "placeholder")

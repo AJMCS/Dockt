@@ -307,10 +307,15 @@ async def chat_messages(messages: list[dict], tools: list[dict] | None = None,
     }
 
 
+AUDIO_EXTENSIONS = {"audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav", "audio/webm": ".webm",
+                    "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a"}
+
+
 async def transcribe(audio: bytes, mime: str) -> str:
     """Send audio bytes to the local OpenAI-compatible Whisper endpoint."""
     content_type = (mime or "application/octet-stream").split(";", 1)[0].strip()
-    extension = mimetypes.guess_extension(content_type) or ".bin"
+    # Whisper servers pick the decoder from the file name; Windows' mimetypes doesn't know audio/wav or audio/webm
+    extension = (AUDIO_EXTENSIONS.get(content_type) or mimetypes.guess_extension(content_type) or ".bin")
     response = await _client.post(
         f"{STT_URL}/audio/transcriptions",
         data={"model": STT_MODEL},
