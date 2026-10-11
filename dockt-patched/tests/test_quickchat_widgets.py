@@ -434,3 +434,14 @@ class QuickChatWidgetTests(unittest.TestCase):
         self.assertGreater(partial, 100, "edges are blended (partly transparent), not cut to fully on/off")
         self.assertFalse(app.pet_canvas.find_withtag("pet-body"), "the robot isn't also drawn on the keyed canvas")
 
+    def test_pet_mic_works_off_windows(self):
+        root, app = self.make_app(96/72)
+        recorder = Mock()
+        recorder.levels.return_value = []
+        with patch.object(quickchat, "MicRecorder", return_value=recorder), \
+                patch.object(quickchat.os, "name", "posix"):   # e.g. macOS: no "Voice needs Windows" any more
+            app._start_voice()
+        self.assertEqual(app.voice_state, "recording")
+        recorder.start.assert_called_once_with()
+        app._cancel_voice()
+

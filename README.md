@@ -61,6 +61,8 @@ On campus Wi-Fi, where the GX10's port can't be reached directly, run `desktop\S
 
 This starts the local service, screen capture and the quick-chat pet. Right-click the pet for controls: **Open Dashboard**, pause or resume capture, and **Quit Dockt**. Click the pet or press `Ctrl+Space` to ask a quick question. Closing the dashboard window hides it; Quit ends everything.
 
+**macOS (preview).** Double-click `dockt-patched/start-dockt.command` (or run it in Terminal; it takes the same `--mock` / `--no-capture` options). It sets up `.venv` the same way and needs Python 3.11+ with Tk; python.org's installer has both. The first time, macOS asks to let Terminal record the screen, read window titles (Accessibility) and use the microphone. The pet, its mic and the dashboard work; the `Ctrl+Space` shortcut is Windows-only for now, and `Setup-GX10.bat` too: on a Mac, put the GX10's address (or `user@host` after `ssh-copy-id`) in `gx10.txt`.
+
 **Developing on macOS/Linux (mock models, no GX10 needed):**
 
 ```bash
