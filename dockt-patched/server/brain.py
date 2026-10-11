@@ -239,7 +239,19 @@ async def extract_one(row, sem):
             memory.store.extract_failed(row["id"], repr(e))
 
 
+async def _warmup():
+    """Load the chat model into memory at startup so the first real /api/chat
+    isn't a 40-60s cold start. Best effort: a tiny tool-less turn, errors ignored."""
+    try:
+        t = time.time()
+        await _chat_messages([{"role": "user", "content": "ready?"}], None, max_tokens=1, temperature=0)
+        print(f"chat model warmed in {time.time() - t:.1f}s")
+    except Exception as e:
+        print(f"warmup skipped: {e!r}")
+
+
 async def extractor():
+    asyncio.create_task(_warmup())  # don't block the extractor loop on it
     sem = asyncio.Semaphore(EXTRACT_CONCURRENCY)
     inflight: set[asyncio.Task] = set()
     while True:
@@ -332,7 +344,8 @@ You cannot see the screens directly: use the tools to look things up before answ
 - draft: write an email/message/todo/notes from captures. Return the draft text as your answer.
 Rules:
 - Every fact must cite the capture it came from as [#id] (one id per bracket, e.g. [#3] [#7]), using ONLY ids that appear in tool results.
-- If the tools return nothing relevant, say "I didn't see that on your screens." Never guess.
+- If the tools return nothing about what was asked, answer in ONE sentence: "I didn't see <the thing> on your screens." Do NOT list or describe the captures you looked at, and do NOT cite anything.
+- Answer the question directly and briefly (usually under 80 words). Cite only the few captures (1-5) that actually support the answer. Never walk through captures one by one.
 - Be concise and specific: names, numbers, times, durations.
 Times are local, written as YYYY-MM-DD HH:MM. Now is {now}."""
 
@@ -508,6 +521,10 @@ def _time_hint(q):
             f"Plans and events for this period were usually seen earlier: search for them without start/end.)")
 
 
+_NEGATIVE = re.compile(r"didn'?t see|not(?:hing)? (?:found|on your screens)|"
+                       r"no (?:requests?|results?|matching|record|information)", re.I)
+
+
 def _finish(answer, sources):
     """Normalize [9] -> [#9] for ids we actually returned, drop [#id]s no tool returned,
     then cited = ids in the answer ∩ sources."""
@@ -516,6 +533,9 @@ def _finish(answer, sources):
     answer = re.sub(r"\[(\d+)\]", lambda m: f"[#{m.group(1)}]" if int(m.group(1)) in sources else m.group(0),
                     answer)
     answer = re.sub(r"\s?\[#(\d+)\]", lambda m: m.group(0) if int(m.group(1)) in sources else "", answer)
+    # a "didn't see / nothing found" answer shouldn't carry citations, even if the model tacked some on
+    if _NEGATIVE.search(answer):
+        answer = re.sub(r"\s?\[#\d+\]", "", answer)
     cited = [i for i in dict.fromkeys(int(x) for x in re.findall(r"\[#(\d+)\]", answer)) if i in sources]
     ordered = [sources[i] for i in cited] + [r for i, r in sources.items() if i not in cited]
     return answer, cited, ordered[:max(12, len(cited))]
@@ -534,6 +554,8 @@ async def _agent(req: ChatReq):
 
     sources: dict[int, dict] = {}
     drafted: list[int] = []  # captures a draft was built from; the model tends to drop their citations
+    searched = False         # did the model ever actually search the screens?
+    forced = False           # have we already forced one fallback search?
     answer = ""
     for rnd in range(CHAT_MAX_ROUNDS + 1):
         last = rnd == CHAT_MAX_ROUNDS
@@ -544,11 +566,26 @@ async def _agent(req: ChatReq):
         calls = out.get("tool_calls") or []
         if not calls:
             answer = (out.get("content") or "").strip()
+            # the model gave up without ever searching — do one keyword search for it, then let it answer again
+            if not last and not forced and not searched and _NEGATIVE.search(answer):
+                forced = True
+                q = history[-1].content
+                yield {"type": "status", "text": _tool_status("search_screens", {"q": q})}
+                result = await _run_tool("search_screens", {"q": q}, req.device, sources)
+                searched = True
+                print(f"chat tool search_screens(fallback {q!r}) -> {len(result)} chars")
+                msgs.append({"role": "assistant", "content": "", "tool_calls": [{
+                    "id": "call_fallback", "type": "function",
+                    "function": {"name": "search_screens", "arguments": json.dumps({"q": q})}}]})
+                msgs.append({"role": "tool", "tool_call_id": "call_fallback", "content": result[:TOOL_MAX_CHARS]})
+                continue
             break
         msgs.append({"role": "assistant", "content": out.get("content") or "", "tool_calls": [
             {"id": c["id"], "type": "function",
              "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])}} for c in calls]})
         for c in calls:
+            if c["name"] == "search_screens":
+                searched = True
             yield {"type": "status", "text": _tool_status(c["name"], c["arguments"])}
             try:
                 result = await _run_tool(c["name"], c["arguments"], req.device, sources)

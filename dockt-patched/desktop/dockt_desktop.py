@@ -210,12 +210,16 @@ def start_tunnel(target: str):
 
 def start_backend(mock: bool, capture: bool) -> subprocess.Popen | None:
     """Start what isn't running yet. Returns the service process if this process started it."""
-    if answers(BASE + "/api/stats"):
-        return None
     env = model_env(mock)
     target = tunnel_target(mock, os.environ)
+    # The web service can already be running from an earlier launch while its SSH
+    # tunnel has dropped (or GX10 setup was just completed). Always restore the
+    # tunnel before reusing that service; otherwise the dashboard stays offline
+    # until the user manually restarts everything.
     if target:
         start_tunnel(target)
+    if answers(BASE + "/api/stats"):
+        return None
     if mock and not answers("http://127.0.0.1:9000/v1/models"):
         spawn("mock_models", ["-m", "uvicorn", "--app-dir", "tools", "mock_models:app", "--port", "9000"], env)
     server = spawn("server", ["server/app.py"], env)

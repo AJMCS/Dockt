@@ -98,6 +98,25 @@ class QuickChatWidgetTests(unittest.TestCase):
         root.update()
         self.assertEqual(app.chat.state(), "withdrawn")
 
+    def test_quickchat_renders_dashboard_style_user_bubble_and_theme_updates_menu(self):
+        root, app = self.make_app(96/72)
+        app._render([{"role": "user", "content": "Where did I save the notes?"},
+                     {"role": "assistant", "content": "They are in the project folder."}])
+        self.assertEqual(app.transcript.get("1.0", "end-1c").splitlines(), [
+            "Where did I save the notes?", "They are in the project folder."])
+        row = app.transcript.winfo_children()[0]
+        bubble = row.winfo_children()[0]
+        self.assertEqual(bubble.cget("corner_radius"), 16)
+
+        original_theme = app.theme_name
+        target_theme = "dark" if original_theme == "light" else "light"
+        app._show_options_at(200, 200)
+        app._apply_theme(target_theme)
+        self.assertEqual(app.options_panel.cget("fg_color"), app.colors["line"])
+        self.assertEqual(app.theme_name, target_theme)
+        self.assertEqual(app.options_panel.winfo_children()[0].cget("width"), 318)
+        self.assertIn("12", str(app.capture_option.cget("font")))
+
     def test_compact_window_at_200_percent_does_not_clip_the_composer(self):
         root, app = self.make_app(192/72, pet_dpi=True)
         app.chat.minsize(480, 360)
@@ -124,6 +143,8 @@ class QuickChatWidgetTests(unittest.TestCase):
         app._pet_hint(True)
         root.update()
         self.assertEqual(len(app.pet_canvas.find_withtag("pet-control-bar")), 1)
+        chat_control = app.pet_canvas.find_withtag("pet-control-chat")[0]
+        self.assertEqual(app.pet_canvas.type(chat_control), "polygon")
         control_bounds = app.pet_canvas.bbox("pet-control-bar")
         self.assertGreater(control_bounds[1], 100)
         self.assertLessEqual(control_bounds[3], 140)
@@ -158,7 +179,7 @@ class QuickChatWidgetTests(unittest.TestCase):
                   if app.pet_canvas.type(item) == "text"]
         self.assertEqual(titles, ["Open quick chat"])
 
-    def test_quick_chat_window_is_centered_when_opened(self):
+    def test_quick_chat_opens_near_pet_without_staying_on_top_or_stealing_focus(self):
         for scaling in (96/72, 144/72, 192/72):
             with self.subTest(scaling=scaling):
                 root, app = self.make_app(scaling)
@@ -171,24 +192,22 @@ class QuickChatWidgetTests(unittest.TestCase):
                 self.assertIsNotNone(match)
                 x, y = map(int, match.groups())
                 scale = ctk.ScalingTracker.get_window_scaling(app.chat)
-                expected_x = (app.chat.winfo_screenwidth() - app.chat.winfo_width()) / (2 * scale)
-                expected_y = (app.chat.winfo_screenheight() - app.chat.winfo_height()) / (2 * scale)
-                self.assertAlmostEqual(x, expected_x, delta=2)
-                self.assertAlmostEqual(y, expected_y, delta=2)
+                pet_x, pet_y = app.pet.winfo_rootx(), app.pet.winfo_rooty()
+                pet_w, pet_h = app.pet.winfo_width(), app.pet.winfo_height()
+                chat_top = y * scale
+                chat_bottom = chat_top + app.chat.winfo_height()
+                self.assertLessEqual(abs(chat_bottom - pet_y), 40 * scale,
+                                     "Quick chat should sit just above the pet")
+                self.assertFalse(app.chat.attributes("-topmost"))
+                self.assertGreaterEqual(x, 0)
+                self.assertGreaterEqual(pet_x + pet_w - (x * scale + app.chat.winfo_width()), 0)
                 self.destroy(root)
 
-    def test_opening_chat_does_not_repeat_focus_for_child_map_events(self):
+    def test_opening_chat_does_not_force_input_focus(self):
         root, app = self.make_app(96/72)
         app.hide()
         root.update()
-        focus_calls = []
-        focus_entry = app._focus_entry
-
-        def count_focus(*args, **kwargs):
-            focus_calls.append(None)
-            return focus_entry(*args, **kwargs)
-
-        with patch.object(app, "_focus_entry", side_effect=count_focus):
+        with patch.object(app, "_focus_entry") as focus_entry:
             app.show()
             deadline = time.monotonic() + 0.4
             while time.monotonic() < deadline:
@@ -196,5 +215,21 @@ class QuickChatWidgetTests(unittest.TestCase):
                 time.sleep(0.01)
 
         self.assertEqual(app.chat.state(), "normal")
-        self.assertGreaterEqual(len(focus_calls), 1)
-        self.assertLessEqual(len(focus_calls), 2)
+        focus_entry.assert_not_called()
+
+    def test_assistant_markdown_is_rendered_with_bold_tags(self):
+        root, app = self.make_app(96/72)
+        app._render([{"role": "assistant", "content": "This is **bold** text and `code`."}])
+        widget = app.transcript.markdown_widgets[0]
+        self.assertIn("bold", widget.tag_names("1.9"))
+        self.assertIn("code", widget.tag_names("1.24"))
+        self.assertIn("This is bold text and code.", widget.get("1.0", "end-1c"))
+
+    def test_quickchat_source_strip_only_shows_latest_cited_captures(self):
+        root, app = self.make_app(96/72)
+        app._render([{"role": "assistant", "content": "Saved in [#2].",
+                      "sources": [{"id": 1}, {"id": 2}], "cited": [2]}])
+        self.assertEqual(list(app.transcript.source_buttons), [2])
+        widget = app.transcript.markdown_widgets[0]
+        self.assertIn("citation_2", widget.tag_names("1.10"))
+        self.assertIn("Saved in #2.", widget.get("1.0", "end-1c"))
