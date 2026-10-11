@@ -249,6 +249,41 @@ def chat_request(messages: list[dict], conversation_id: str | None = None) -> di
     return result
 
 
+_status_urlopen = urlopen   # module-level so tests that patch quickchat.urlopen don't see these polls
+
+
+def _fetch_json(path: str, timeout: float = 2.5):
+    with _status_urlopen(BASE_URL + path, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def poll_pet_status(events: queue.Queue, stop: threading.Event) -> None:
+    """Background loop: tell the pet whether Dockt is reading, and whether it can reach its models.
+    Stats is a cheap local query every 3 s; health asks the GX10's model servers, so every ~12 s."""
+    failures, last_done, models_ok, tick = 0, None, True, 0
+    while not stop.wait(0 if tick == 0 else 3):
+        try:
+            stats = _fetch_json("/api/stats")
+            failures = 0
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+            failures += 1
+            stats = None
+        if stats is not None and tick % 4 == 0:
+            try:
+                models = _fetch_json("/api/health", timeout=10).get("models") or {}
+                models_ok = bool(models) and all(models.values())
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError, AttributeError):
+                models_ok = False
+        tick += 1
+        done = (stats or {}).get("done")
+        reading = bool(stats) and ((stats.get("queued") or 0) > 0 or
+                                   (last_done is not None and done != last_done))
+        last_done = done if stats else last_done
+        # One missed poll is often just the service starting up; two in a row means it's down.
+        events.put(("pet-status", {"service_ok": failures < 2, "models_ok": models_ok,
+                                   "reading": reading}))
+
+
 def load_conversation(conversation_id: str) -> dict | None:
     try:
         with urlopen(BASE_URL + "/api/conversations/" + quote(conversation_id, safe=""), timeout=2) as response:
@@ -296,11 +331,13 @@ PET_SIZE = 90   # ...and shown this many logical pixels square in the 160 x 140 
 
 
 def _pet_image(size: int, blink: bool = False, key: tuple | None = None,
-               squash: float = 1.0) -> Image.Image:
-    """Dockt's mascot: a chibi Astro Bot-style robot with a round white helmet, glossy visor,
-    big sparkly lime eyes and a waving arm. `squash` < 1 flattens it (and > 1 stretches it)
-    on its feet for a bouncy, cartoony bob. With `key`, edge pixels are flattened onto the
-    dark outline so Windows' transparent-colour keying leaves no pink fringe."""
+               squash: float = 1.0, mood: str = "normal", look: float = 0) -> Image.Image:
+    """Dockt's mascot: a chibi Astro Bot-style robot with a round white helmet, glossy visor
+    and big sparkly lime eyes. `squash` < 1 flattens it on its feet for a bouncy bob.
+    `mood` shows what Dockt is doing: "reading" (brighter eyes glancing by `look` units),
+    "asleep" (capture paused: closed eyes and z's) or "offline" (red x eyes and antenna).
+    With `key`, edge pixels are flattened onto the dark outline so Windows'
+    transparent-colour keying leaves no pink fringe."""
     from PIL import ImageChops, ImageDraw, ImageFilter
     ss = 4                                   # supersample, then downsample for smooth curves
     px = size * ss
@@ -311,6 +348,8 @@ def _pet_image(size: int, blink: bool = False, key: tuple | None = None,
 
     ink, white, shade = "#1F1E1D", "#FFFFFF", "#E2E0D6"
     lime, glow_lime = "#A3E635", (163, 230, 53)
+    alarm, glow_alarm = "#FF6B5E", (255, 107, 94)     # offline: eyes and antenna go red
+    eye_color = alarm if mood == "offline" else lime
     ow = max(1, round(3.6 * u))              # chunky cartoon outline
     image = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -341,17 +380,17 @@ def _pet_image(size: int, blink: bool = False, key: tuple | None = None,
                                            center=(pivot[0] * u, pivot[1] * u)))
 
     # boots, arms (one waving), tiny body: back to front
-    shape("ellipse", (35, 85, 50, 97), white)
-    shape("ellipse", (50, 85, 65, 97), white)
-    limb((32, 72, 43, 86), -50, (37.5, 73))         # arm out to the side
-    limb((57, 72, 68, 86), 50, (62.5, 73))          # and its twin on the other side
-    shape("rect", (35, 68, 65, 92), white, 12)
-    tint(shade, ImageChops.subtract(mask("rect", (37, 70, 63, 90), 10),
-                                    mask("ellipse", (28, 56, 72, 86))))
-    draw.rounded_rectangle(box(35, 68, 65, 92), radius=12 * u, outline=ink, width=ow)
-    draw.ellipse(box(46.5, 77, 53.5, 84), fill=lime, outline=ink,
+    shape("ellipse", (33, 85, 50, 98), white)
+    shape("ellipse", (50, 85, 67, 98), white)
+    limb((29, 71, 40, 86), -50, (34.5, 72))         # arm out to the side
+    limb((60, 71, 71, 86), 50, (65.5, 72))          # and its twin on the other side
+    shape("rect", (31, 65, 69, 94), white, 15)
+    tint(shade, ImageChops.subtract(mask("rect", (33, 67, 67, 92), 13),
+                                    mask("ellipse", (22, 52, 78, 88))))
+    draw.rounded_rectangle(box(31, 65, 69, 94), radius=15 * u, outline=ink, width=ow)
+    draw.ellipse(box(45.5, 77, 54.5, 86), fill=eye_color, outline=ink,
                  width=max(1, round(2 * u)))                       # chest light
-    draw.ellipse(box(48, 78.5, 50.2, 80.7), fill="#F7FEE7")
+    draw.ellipse(box(47.5, 79, 50, 81.5), fill="#F7FEE7")
     # bendy antenna behind the helmet
     stem = [(50 * u, 18 * u), (52 * u, 11 * u), (56 * u, 5 * u)]
     draw.line(stem, fill=ink, width=max(1, round(6 * u)), joint="curve")
@@ -368,34 +407,54 @@ def _pet_image(size: int, blink: bool = False, key: tuple | None = None,
     # visor, its glow, eyes, smile, cheeks and gloss
     shape("rect", (16, 22, 84, 65), "#141614", 21)
     visor = mask("rect", (18, 24, 82, 63), 19)
-    eyes = ((36, 43), (64, 43))
+    eyes = ((36 + look, 43), (64 + look, 43))
+    stroke = max(1, round(3.6 * u))
     glow = Image.new("L", (px, px), 0)
     gd = ImageDraw.Draw(glow)
+    strength = {"reading": 200, "asleep": 55, "offline": 120}.get(mood, 130)
     for x, y in eyes:
-        gd.ellipse(box(x - 11, y - 12, x + 11, y + 12), fill=130)
-    tint(glow_lime, ImageChops.multiply(glow.filter(ImageFilter.GaussianBlur(5 * u)), visor))
+        gd.ellipse(box(x - 11, y - 12, x + 11, y + 12), fill=strength)
+    tint(glow_alarm if mood == "offline" else glow_lime,
+         ImageChops.multiply(glow.filter(ImageFilter.GaussianBlur(5 * u)), visor))
     for x, y in eyes:
-        if blink:                            # happy closed eyes: upside-down U arcs
-            draw.arc(box(x - 7, y - 4, x + 7, y + 8), 200, 340, fill=lime,
-                     width=max(1, round(3.6 * u)))
+        if mood == "offline":                # dazed x eyes
+            draw.line(box(x - 5.5, y - 5.5, x + 5.5, y + 5.5), fill=alarm, width=stroke)
+            draw.line(box(x - 5.5, y + 5.5, x + 5.5, y - 5.5), fill=alarm, width=stroke)
+        elif mood == "asleep":               # peaceful closed eyes: U arcs
+            draw.arc(box(x - 7, y - 6, x + 7, y + 4), 20, 160, fill=lime, width=stroke)
+        elif blink:                          # happy closed eyes: upside-down U arcs
+            draw.arc(box(x - 7, y - 4, x + 7, y + 8), 200, 340, fill=lime, width=stroke)
         else:
             draw.ellipse(box(x - 7, y - 9.5, x + 7, y + 9.5), fill=lime)
             draw.ellipse(box(x - 4.8, y - 7, x - 0.4, y - 2.6), fill="#FFFFFF")   # big sparkle
             draw.ellipse(box(x + 1.6, y + 3, x + 3.8, y + 5.2), fill="#F7FEE7")   # small sparkle
-    draw.arc(box(46, 51, 54, 58), 20, 160, fill=lime, width=max(1, round(2.4 * u)))   # smile
-    blush = Image.new("L", (px, px), 0)
-    bd = ImageDraw.Draw(blush)
-    for x, y in ((25, 55), (75, 55)):
-        bd.ellipse(box(x - 5.5, y - 3, x + 5.5, y + 3), fill=150)
-    tint("#FF8FA3", ImageChops.multiply(blush, visor))
+    mouth = max(1, round(2.4 * u))
+    if mood == "offline":                    # worried frown
+        draw.arc(box(46, 53, 54, 60), 200, 340, fill=alarm, width=mouth)
+    elif mood == "asleep":                   # little sleepy "o"
+        draw.ellipse(box(48, 53, 52, 57), outline=lime, width=mouth)
+    else:
+        draw.arc(box(46, 51, 54, 58), 20, 160, fill=lime, width=mouth)   # smile
+    if mood != "offline":
+        blush = Image.new("L", (px, px), 0)
+        bd = ImageDraw.Draw(blush)
+        for x, y in ((25, 55), (75, 55)):
+            bd.ellipse(box(x - 5.5, y - 3, x + 5.5, y + 3), fill=150)
+        tint("#FF8FA3", ImageChops.multiply(blush, visor))
     gloss = Image.new("L", (px, px), 0)
     gl = ImageDraw.Draw(gloss)
     gl.polygon([(20 * u, 38 * u), (31 * u, 25 * u), (40 * u, 25 * u), (22 * u, 46 * u)], fill=70)
     gl.polygon([(43 * u, 25 * u), (47 * u, 25 * u), (27 * u, 50 * u), (24 * u, 50 * u)], fill=45)
     tint("#FFFFFF", ImageChops.multiply(gloss, visor))
     # glowing antenna ball with a sparkle
-    shape("ellipse", (50.5, 1.5, 62.5, 13.5), lime)
+    shape("ellipse", (50.5, 1.5, 62.5, 13.5), alarm if mood == "offline" else lime)
     draw.ellipse(box(53.5, 4, 57.5, 8), fill="#FFFFFF")
+    if mood == "asleep":                     # z z, outlined so they show on any desktop
+        for zx, zy, zs in ((70, 6, 7), (82, 0, 10)):
+            z = [(zx * u, zy * u), ((zx + zs) * u, zy * u),
+                 (zx * u, (zy + zs) * u), ((zx + zs) * u, (zy + zs) * u)]
+            draw.line(z, fill=ink, width=max(1, round(5 * u)), joint="curve")
+            draw.line(z, fill="#F5F4EE", width=max(1, round(2.2 * u)), joint="curve")
 
     image = image.resize((size, size), Image.Resampling.LANCZOS)
     if squash != 1.0:                        # squash/stretch with the feet planted
@@ -725,6 +784,10 @@ class QuickChat:
         _apply_windows_caption_theme(self.chat.winfo_id(), self.theme_name)
         self.chat.bind("<Configure>", self._schedule_responsive_layout, add="+")
         self._create_pet()
+        self.pet_status = {}
+        self._status_stop = threading.Event()
+        threading.Thread(target=poll_pet_status, args=(self.events, self._status_stop),
+                         name="dockt-pet-status", daemon=True).start()
         self.root.after(80, self._drain_events)
         self.root.after(1000, self._poll_shared_history)
         self.root.after(800, self._poll_theme)
@@ -987,6 +1050,7 @@ class QuickChat:
         self.pet_xy = (0, 0)
         self.pet_dragged = False
         self.pet_bob = 0
+        self.pet_mood = "normal"
         self.pet_hint_visible = False
         self.pet_hover_button = None
         self._hint_hide_job = None
@@ -1010,16 +1074,20 @@ class QuickChat:
         bob = self.pet_bob
 
         # Astro Bot-style robot, rendered once per eye state at this screen's scale.
-        blink = getattr(self, "pet_blink", False)
+        mood = getattr(self, "pet_mood", "normal")
+        blink = getattr(self, "pet_blink", False) and mood in ("normal", "reading")
         squash = 0.94 if bob == 0 else 1.0    # squash when it lands, full height at the top of the hop
+        look = (-3 if bob else 3) if mood == "reading" else 0   # eyes glance side to side while reading
+        frame = (mood, blink, squash, look)
         photos = self.__dict__.setdefault("_pet_photos", {})
-        if (blink, squash) not in photos:
+        if frame not in photos:
             key = None if self.pet_background != "#ff00ff" else (255, 0, 255)
-            photos[(blink, squash)] = ImageTk.PhotoImage(
-                _pet_image(round(PET_SIZE * self.ui_scale), blink, key, squash), master=self.pet)
+            photos[frame] = ImageTk.PhotoImage(
+                _pet_image(round(PET_SIZE * self.ui_scale), blink, key, squash, mood, look),
+                master=self.pet)
         # Top-centred, leaving the bottom of the window for the hover controls and tooltip.
         canvas.create_image((160 - PET_SIZE) / 2, 5 - bob, anchor="nw",
-                            image=photos[(blink, squash)], tags=("pet-body",))
+                            image=photos[frame], tags=("pet-body",))
         if self.pet_hint_visible:
             self._draw_pet_controls(canvas)
         canvas.scale("all", 0, 0, self.ui_scale, self.ui_scale)
@@ -1084,12 +1152,22 @@ class QuickChat:
         if not self.pet.winfo_exists():
             return
         self.pet_bob = 3 if self.pet_bob == 0 else 0
+        self.pet_mood = self._pet_mood()
         self.pet_ticks = getattr(self, "pet_ticks", 0) + 1
         if self.pet_ticks % 8 == 0:   # a quick happy blink every ~4 s
             self.pet_blink = True
             self.pet.after(180, self._end_blink)
         self._draw_pet()
         self.pet.after(520, self._animate_pet)
+
+    def _pet_mood(self) -> str:
+        """offline beats asleep beats reading: a broken connection matters most."""
+        status = getattr(self, "pet_status", {})
+        if not status.get("service_ok", True) or not status.get("models_ok", True):
+            return "offline"
+        if capture_is_paused():
+            return "asleep"
+        return "reading" if status.get("reading") else "normal"
 
     def _end_blink(self):
         self.pet_blink = False
@@ -1251,6 +1329,9 @@ class QuickChat:
 
     def _toggle_capture(self):
         paused = toggle_capture()
+        if hasattr(self, "pet_canvas"):
+            self.pet_mood = self._pet_mood()
+            self._draw_pet()
         if self.options_panel is not None and hasattr(self, "capture_option"):
             self.capture_option.configure(text=f"\u25cf   {self._capture_menu_label()}")
         self.status.set("Screen capture paused" if paused else "Screen capture resumed")
@@ -1508,6 +1589,12 @@ class QuickChat:
                 kind, value = self.events.get_nowait()
                 if kind == "toggle":
                     self.toggle()
+                elif kind == "pet-status":
+                    self.pet_status = value
+                    mood = self._pet_mood()
+                    if mood != self.pet_mood:
+                        self.pet_mood = mood
+                        self._draw_pet()
                 elif kind == "hotkey-error":
                     self.status.set(value)
                     self.show()
@@ -1554,6 +1641,8 @@ class QuickChat:
         self.root.after(80, self._drain_events)
 
     def close(self):
+        if getattr(self, "_status_stop", None) is not None:
+            self._status_stop.set()
         if self.hotkey:
             self.hotkey.stop()
         try:
