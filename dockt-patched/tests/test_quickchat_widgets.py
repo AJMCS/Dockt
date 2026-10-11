@@ -112,7 +112,8 @@ class QuickChatWidgetTests(unittest.TestCase):
         target_theme = "dark" if original_theme == "light" else "light"
         app._show_options_at(200, 200)
         app._apply_theme(target_theme)
-        self.assertEqual(app.options_panel.cget("fg_color"), app.colors["line"])
+        self.assertEqual(app.options_panel.cget("fg_color"), quickchat._corner_key(app.colors))
+        self.assertEqual(app.options_panel.winfo_children()[0].cget("fg_color"), app.colors["surface"])
         self.assertEqual(app.theme_name, target_theme)
         self.assertEqual(app.options_panel.winfo_children()[0].cget("width"), 318)
         self.assertIn("12", str(app.capture_option.cget("font")))
