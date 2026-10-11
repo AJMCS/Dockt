@@ -35,6 +35,7 @@ MOD_NOREPEAT = 0x4000
 VK_SPACE = 0x20
 CITATION = re.compile(r"\[#(\d+)\]")
 CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
+THEME_FILE = Path.home() / ".dockt_theme"
 PALETTES = {
     "light": {
         "bg": "#FAF9F5", "surface": "#FFFFFF", "surface2": "#F5F4EE",
@@ -92,6 +93,14 @@ def _enable_windows_dpi_awareness(user32=None, shcore=None) -> bool:
 def capture_is_paused() -> bool:
     """Match the capture agent's shared per-user pause switch."""
     return CAPTURE_PAUSE_FILE.exists()
+
+
+def _saved_theme() -> str | None:
+    try:
+        theme = THEME_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return theme if theme in PALETTES else None
 
 
 def toggle_capture() -> bool:
@@ -248,10 +257,11 @@ class QuickChat:
         self.root = root
         self.root.withdraw()
         self.ui_scale = max(1.0, float(root.winfo_fpixels("1i")) / 96.0)
-        self.colors = PALETTES["dark" if _system_dark_mode() else "light"]
+        self.theme_name = _saved_theme() or ("dark" if _system_dark_mode() else "light")
+        self.colors = PALETTES[self.theme_name]
         self.chat = ctk.CTkToplevel(self.root, fg_color=self.colors["bg"])
         self.chat.title("Dockt Quick Chat")
-        self.chat.geometry("720x600")
+        self.chat.geometry("700x580")
         self.chat.minsize(360, 280)
         self.chat.attributes("-topmost", True)
         self.chat.withdraw()
@@ -273,6 +283,7 @@ class QuickChat:
         self._create_pet()
         self.root.after(80, self._drain_events)
         self.root.after(1000, self._poll_shared_history)
+        self.root.after(800, self._poll_theme)
 
         self.hotkey = None
         if os.name == "nt":
@@ -316,11 +327,74 @@ class QuickChat:
         style.map("Citation.TButton", background=[("active", colors["accent"])],
                   foreground=[("active", colors["on_accent"])])
 
+    @staticmethod
+    def _recolor_tree(widget, previous, current_palette):
+        color_options = {
+            "fg_color": ("bg", "surface", "surface2", "line", "accent", "accent_soft"),
+            "bg_color": ("bg", "surface", "surface2", "line"),
+            "text_color": ("text", "muted", "accent_text", "on_accent", "error"),
+            "border_color": ("line", "accent", "surface", "surface2"),
+            "hover_color": ("line", "surface2", "accent_soft", "accent"),
+            "button_color": ("surface2", "line", "accent"),
+            "button_hover_color": ("accent", "accent_soft", "line"),
+            "bg": ("bg", "surface", "surface2", "accent_soft"),
+            "fg": ("text", "muted", "accent_text", "error"),
+            "insertbackground": ("text",),
+        }
+        try:
+            for option, keys in color_options.items():
+                try:
+                    current = widget.cget(option)
+                except (tk.TclError, AttributeError):
+                    continue
+                replacement = next((current_palette[key] for key in keys
+                                    if previous[key] == current), None)
+                if replacement is not None:
+                    try:
+                        widget.configure(**{option: replacement})
+                    except (tk.TclError, TypeError):
+                        pass
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            QuickChat._recolor_tree(child, previous, current_palette)
+
+    def _apply_theme(self, theme: str):
+        if theme not in PALETTES or theme == self.theme_name:
+            return
+        previous = self.colors
+        self.theme_name = theme
+        self.colors = PALETTES[theme]
+        self._style()
+        self._recolor_tree(self.root, previous, self.colors)
+        self.transcript.configure(bg=self.colors["surface"], fg=self.colors["text"],
+                                  insertbackground=self.colors["text"])
+        self.transcript.tag_configure("user", foreground=self.colors["text"])
+        self.transcript.tag_configure("user_body", foreground=self.colors["text"],
+                                      background=self.colors["accent_soft"])
+        self.transcript.tag_configure("assistant", foreground=self.colors["accent_text"])
+        self.transcript.tag_configure("assistant_body", foreground=self.colors["text"])
+        self.transcript.tag_configure("error", foreground=self.colors["error"])
+        self.entry._textbox.configure(insertbackground=self.colors["text"])
+        self.entry._textbox.tag_configure("placeholder", foreground=self.colors["muted"])
+
+    def _poll_theme(self):
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        theme = _saved_theme()
+        if theme:
+            self._apply_theme(theme)
+        self.root.after(800, self._poll_theme)
+
     def _build(self):
-        frame = ctk.CTkFrame(self.chat, fg_color=self.colors["bg"], corner_radius=20)
-        frame.pack(fill="both", expand=True, padx=6, pady=6)
+        frame = ctk.CTkFrame(self.chat, fg_color=self.colors["bg"], corner_radius=22)
+        frame.pack(fill="both", expand=True, padx=8, pady=8)
         content = ctk.CTkFrame(frame, fg_color="transparent")
-        content.pack(fill="both", expand=True, padx=10, pady=8)
+        content.pack(fill="both", expand=True, padx=14, pady=12)
         frame = content
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(1, weight=1)
@@ -329,15 +403,17 @@ class QuickChat:
         brand = ctk.CTkFrame(header, fg_color="transparent", height=1)
         brand.pack(side="left")
         ctk.CTkLabel(brand, text="Dockt", text_color=self.colors["text"],
-                     font=("Segoe UI", 19, "bold")).pack(side="left")
+                     font=("Segoe UI", 20, "bold")).pack(side="left")
         ctk.CTkLabel(brand, text=".", text_color=self.colors["accent"],
-                     font=("Segoe UI", 19, "bold")).pack(side="left")
-        ctk.CTkLabel(header, text="Quick chat", text_color=self.colors["muted"],
-                     font=("Segoe UI", 11)).pack(
-            side="left", padx=(12, 0), pady=(7, 0))
-        ctk.CTkLabel(header, text="Ctrl+Space", text_color=self.colors["muted"],
-                     font=("Segoe UI", 10)).pack(
-            side="right", pady=(7, 0))
+                     font=("Segoe UI", 20, "bold")).pack(side="left")
+        ctk.CTkLabel(header, text="QUICK CHAT", text_color=self.colors["accent_text"],
+                     fg_color=self.colors["accent_soft"], corner_radius=9,
+                     padx=9, pady=4, font=("Segoe UI", 9, "bold")).pack(
+            side="left", padx=(12, 0), pady=(4, 0))
+        ctk.CTkLabel(header, text="Ctrl + Space", text_color=self.colors["muted"],
+                     fg_color=self.colors["surface2"], corner_radius=9,
+                     padx=9, pady=4, font=("Segoe UI", 9)).pack(
+            side="right", pady=(4, 0))
 
         transcript_card = ctk.CTkFrame(
             frame, fg_color=self.colors["surface"], corner_radius=16, height=1)
@@ -349,8 +425,11 @@ class QuickChat:
                                   spacing1=2, spacing3=10, highlightthickness=0,
                                   takefocus=False)
         self.transcript.pack(side="left", fill="both", expand=True, padx=(9, 0), pady=8)
-        transcript_scrollbar = ttk.Scrollbar(transcript_card, orient="vertical",
-                                             command=self.transcript.yview)
+        transcript_scrollbar = ctk.CTkScrollbar(
+            transcript_card, orientation="vertical", command=self.transcript.yview,
+            width=8, corner_radius=5, fg_color=self.colors["surface"],
+            button_color=self.colors["surface2"],
+            button_hover_color=self.colors["accent"])
         transcript_scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
         self.transcript.configure(yscrollcommand=transcript_scrollbar.set)
         self.transcript.tag_configure("user", foreground=self.colors["text"],
@@ -359,14 +438,15 @@ class QuickChat:
         self.transcript.tag_configure("user_body", foreground=self.colors["text"],
                                       background=self.colors["accent_soft"],
                                       font=("Segoe UI", 11), justify="right",
-                                      lmargin1=72, lmargin2=72, rmargin=4,
-                                      spacing1=3, spacing3=12)
+                                      lmargin1=72, lmargin2=72, rmargin=10,
+                                      spacing1=6, spacing3=16)
         self.transcript.tag_configure("assistant", foreground=self.colors["accent_text"],
                                       font=("Segoe UI", 10, "bold"), spacing1=8)
         self.transcript.tag_configure("assistant_body", foreground=self.colors["text"],
                                       font=("Segoe UI", 12), lmargin1=2, lmargin2=2,
                                       rmargin=28, spacing1=2, spacing3=10)
         self.transcript.tag_configure("error", foreground=self.colors["error"])
+        self.transcript.bind("<Configure>", self._resize_message_margins, add="+")
 
         self.thumbnail_row = ctk.CTkFrame(frame, fg_color="transparent", height=1)
         self.thumbnail_row.grid(row=2, column=0, sticky="ew", pady=(0, 7))
@@ -435,7 +515,12 @@ class QuickChat:
         self._responsive_layout_job = None
         if not hasattr(self, "footer"):
             return
-        scale = ctk.ScalingTracker.get_window_scaling(self.chat)
+        try:
+            if not self.chat.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        scale = self._window_scaling()
         width = self.chat.winfo_width() / max(1.0, scale)
         compact = width < 620
         narrow = width < 430
@@ -459,6 +544,17 @@ class QuickChat:
             for column in (1, 2, 3):
                 self.footer.columnconfigure(column, weight=0, uniform="")
         self._resize_composer()
+
+    def _window_scaling(self):
+        try:
+            return max(1.0, float(ctk.ScalingTracker.get_window_scaling(self.chat)))
+        except (AttributeError, KeyError, tk.TclError):
+            return max(1.0, float(getattr(self, "ui_scale", 1.0)))
+
+    def _resize_message_margins(self, _event=None):
+        width = max(1, self.transcript.winfo_width())
+        margin = min(112, max(40, round(width * 0.18)))
+        self.transcript.tag_configure("user_body", lmargin1=margin, lmargin2=margin)
 
     def _create_pet(self):
         self.pet = tk.Toplevel(self.root)
@@ -501,7 +597,7 @@ class QuickChat:
         self.pet.update_idletasks()
         width, height = round(160*self.ui_scale), round(140*self.ui_scale)
         x = max(0, self.pet.winfo_screenwidth() - width - 24)
-        y = max(0, self.pet.winfo_screenheight() - height - 56)
+        y = max(0, self.pet.winfo_screenheight() - height - round(88*self.ui_scale))
         self.pet.geometry(f"{width}x{height}+{x}+{y}")
 
     def _draw_pet(self):
@@ -650,27 +746,39 @@ class QuickChat:
     def _show_options_at(self, x_root, y_root):
         self._pet_hint(False)
         self._close_options_panel()
-        panel = tk.Toplevel(self.pet)
+        panel = ctk.CTkToplevel(self.pet, fg_color=self.colors["line"])
         self.options_panel = panel
         panel.overrideredirect(True)
         panel.attributes("-topmost", True)
-        panel.configure(bg=self.colors["line"])
 
-        card = ttk.Frame(panel, padding=(8, 8), style="MenuCard.TFrame")
+        card = ctk.CTkFrame(panel, width=292, fg_color=self.colors["surface"],
+                            corner_radius=18, border_width=1,
+                            border_color=self.colors["line"])
         card.pack(fill="both", expand=True, padx=1, pady=1)
-        header = ttk.Frame(card, style="MenuCard.TFrame")
-        header.pack(fill="x", padx=6, pady=(4, 8))
-        ttk.Label(header, text="Dockt controls", font=("Segoe UI", 12, "bold"),
-                  style="MenuCard.TLabel").pack(side="left")
-        ttk.Button(header, text="×", width=3, style="Menu.TButton",
-                   command=self._close_options_panel).pack(side="right")
+        header = ctk.CTkFrame(card, fg_color="transparent", height=48)
+        header.pack(fill="x", padx=12, pady=(10, 6))
+        title_group = ctk.CTkFrame(header, fg_color="transparent")
+        title_group.pack(side="left", fill="y")
+        ctk.CTkLabel(title_group, text="Dockt", text_color=self.colors["text"],
+                     font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ctk.CTkLabel(title_group, text="Quick actions", text_color=self.colors["muted"],
+                     font=("Segoe UI", 10)).pack(anchor="w")
+        ctk.CTkButton(header, text="\u00d7", width=30, height=30, corner_radius=10,
+                      fg_color="transparent", hover_color=self.colors["surface2"],
+                      text_color=self.colors["muted"], font=("Segoe UI", 18),
+                      command=self._close_options_panel).pack(side="right", anchor="n")
 
-        self._add_option(card, "Open Quick Chat", self.show)
-        self._add_option(card, "Open Dashboard", lambda: open_dockt())
-        self._add_option(card, "Hide Dockt Pet", self.hide_pet)
-        self.capture_option = self._add_option(card, self._capture_menu_label(), self._toggle_capture)
-        ttk.Separator(card).pack(fill="x", padx=6, pady=6)
-        self._add_option(card, "Quit Dockt", self.close, danger=True)
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.pack(fill="x", padx=10, pady=(0, 8))
+        self._add_option(actions, "Open quick chat", self.show, icon="\u25c9")
+        self._add_option(actions, "Open dashboard", lambda: open_dockt(), icon="\u25a6")
+        self._add_option(actions, "Hide Dockt pet", self.hide_pet, icon="\u25ce")
+        self.capture_option = self._add_option(
+            actions, self._capture_menu_label(), self._toggle_capture, icon="\u25cf")
+        ctk.CTkFrame(card, height=1, fg_color=self.colors["line"],
+                     corner_radius=0).pack(fill="x", padx=18, pady=4)
+        self._add_option(card, "Quit Dockt", self.close, danger=True, icon="\u23fb")
+        ctk.CTkFrame(card, height=5, fg_color="transparent").pack()
 
         panel.update_idletasks()
         width, height = panel.winfo_reqwidth(), panel.winfo_reqheight()
@@ -682,11 +790,17 @@ class QuickChat:
         panel.bind("<FocusOut>", self._options_focus_out, add="+")
         panel.focus_force()
 
-    def _add_option(self, parent, label: str, action, danger: bool = False):
-        style = "MenuDanger.TButton" if danger else "Menu.TButton"
-        button = ttk.Button(parent, text=label, style=style,
-                            command=lambda: self._run_option(action))
-        button.pack(fill="x", padx=2, pady=1)
+    def _add_option(self, parent, label: str, action, danger: bool = False,
+                    icon: str = ""):
+        colors = self.colors
+        button = ctk.CTkButton(
+            parent, text=f"{icon}   {label}" if icon else label,
+            anchor="w", height=42, corner_radius=11, border_width=0,
+            fg_color="transparent", hover_color=colors["accent_soft"],
+            text_color=colors["error"] if danger else colors["text"],
+            font=("Segoe UI", 11, "bold" if danger else "normal"),
+            command=lambda: self._run_option(action))
+        button.pack(fill="x", padx=2, pady=2)
         return button
 
     def _run_option(self, action):
@@ -728,7 +842,7 @@ class QuickChat:
     def _toggle_capture(self):
         paused = toggle_capture()
         if self.options_panel is not None and hasattr(self, "capture_option"):
-            self.capture_option.configure(text=self._capture_menu_label())
+            self.capture_option.configure(text=f"\u25cf   {self._capture_menu_label()}")
         self.status.set("Screen capture paused" if paused else "Screen capture resumed")
 
     def toggle(self):
@@ -817,16 +931,29 @@ class QuickChat:
 
     def _resize_composer(self, _event=None):
         self._composer_resize_job = None
-        lines = self.entry._textbox.count("1.0", "end-1c", "displaylines") or (1,)
-        scale = ctk.ScalingTracker.get_window_scaling(self.chat)
-        window_height = self.chat.winfo_height() / max(1.0, scale)
-        max_height = max(44, min(128, int(window_height - 260)))
+        try:
+            lines = self.entry._textbox.count("1.0", "end-1c", "displaylines") or (1,)
+        except tk.TclError:
+            return
+        if hasattr(self, "chat"):
+            scale = self._window_scaling()
+            window_height = self.chat.winfo_height() / scale
+            max_height = max(44, min(128, int(window_height - 260)))
+        else:
+            max_height = 128
         desired_height = max(44, min(max_height, 34 * lines[0]))
-        if int(self.entry.cget("height")) != desired_height:
+        try:
+            current_height = int(self.entry.cget("height"))
+        except (TypeError, ValueError, tk.TclError):
+            current_height = None
+        if current_height != desired_height:
             self.entry.configure(height=desired_height)
 
     def _schedule_composer_resize(self):
-        if self._composer_resize_job is not None:
+        if not hasattr(self, "root"):
+            self._resize_composer()
+            return
+        if getattr(self, "_composer_resize_job", None) is not None:
             try:
                 self.root.after_cancel(self._composer_resize_job)
             except tk.TclError:

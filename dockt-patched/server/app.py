@@ -45,6 +45,7 @@ from memory import IMG_DIR, store
 TOKEN = os.environ.get("DOCKT_TOKEN", "")
 STATIC = Path(__file__).parent / "static"
 CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
+THEME_FILE = Path.home() / ".dockt_theme"
 
 
 @asynccontextmanager
@@ -116,6 +117,27 @@ async def set_capture_control(control: CaptureControl):
     else:
         CAPTURE_PAUSE_FILE.unlink(missing_ok=True)
     return {"paused": CAPTURE_PAUSE_FILE.exists()}
+
+
+class ThemePreference(BaseModel):
+    theme: str
+
+
+@app.get("/api/theme")
+async def get_theme():
+    try:
+        theme = THEME_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        theme = ""
+    return {"theme": theme if theme in {"light", "dark"} else None}
+
+
+@app.post("/api/theme")
+async def set_theme(preference: ThemePreference):
+    if preference.theme not in {"light", "dark"}:
+        raise HTTPException(400, "theme must be light or dark")
+    THEME_FILE.write_text(preference.theme, encoding="utf-8")
+    return {"theme": preference.theme}
 
 
 @app.get("/api/health")

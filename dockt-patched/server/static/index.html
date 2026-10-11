@@ -1002,13 +1002,34 @@ setPane("sources", false);   // narrow windows start with the panel closed
 requestAnimationFrame(() => requestAnimationFrame(() => $("#pane").style.transition = ""));
 route();
 
-// ---------- theme ----------
+// ---------- shared theme (dashboard + native quick chat) ----------
+function applyTheme(theme, persist = true) {
+  if (theme !== "light" && theme !== "dark") return;
+  const root = document.documentElement;
+  root.dataset.theme = theme;
+  try { localStorage.setItem("dockt-theme", theme); } catch {}
+  if (persist) api("/api/theme", {method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({theme})}).catch(e => console.warn("Couldn't sync Dockt theme:", e));
+}
+async function syncTheme() {
+  try {
+    const saved = await api("/api/theme");
+    if (saved.theme === "light" || saved.theme === "dark") {
+      applyTheme(saved.theme, false);
+      return;
+    }
+    const theme = document.documentElement.dataset.theme ||
+      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    applyTheme(theme);
+  } catch {}
+}
 $("#themeToggle").onclick = () => {
   const root = document.documentElement;
-  const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
-  root.dataset.theme = dark ? "light" : "dark";
-  try { localStorage.setItem("dockt-theme", root.dataset.theme); } catch {}
+  const current = root.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  applyTheme(current === "dark" ? "light" : "dark");
 };
+syncTheme();
 
 // hovering a citation highlights its card in the sources panel
 $("#thread").addEventListener("mouseover", e => {
