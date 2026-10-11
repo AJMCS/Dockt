@@ -1061,17 +1061,14 @@ function applyTheme(theme, persist = true) {
   if (persist) api("/api/theme", {method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({theme})}).catch(e => console.warn("Couldn't sync Dockt theme:", e));
 }
+// The service's saved choice wins. Only the toggle saves one: with nothing saved, both apps follow the system theme.
 async function syncTheme() {
   try {
     const saved = await api("/api/theme");
-    if (saved.theme === "light" || saved.theme === "dark") {
-      applyTheme(saved.theme, false);
-      return;
-    }
-    const theme = document.documentElement.dataset.theme ||
-      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    applyTheme(theme);
-  } catch {}
+    if (saved.theme === "light" || saved.theme === "dark") return applyTheme(saved.theme, false);
+    delete document.documentElement.dataset.theme;
+    try { localStorage.removeItem("dockt-theme"); } catch {}
+  } catch {}   // service unreachable: keep this window's last choice
 }
 $("#themeToggle").onclick = () => {
   const root = document.documentElement;

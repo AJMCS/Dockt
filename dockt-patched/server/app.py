@@ -45,7 +45,7 @@ from memory import IMG_DIR, store
 TOKEN = os.environ.get("DOCKT_TOKEN", "")
 STATIC = Path(__file__).parent / "static"
 CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
-THEME_FILE = Path.home() / ".dockt_theme"
+THEME_FILE = memory.DATA_DIR / "theme"   # per data folder, so test servers never touch the real preference
 
 
 @asynccontextmanager
@@ -136,6 +136,7 @@ async def get_theme():
 async def set_theme(preference: ThemePreference):
     if preference.theme not in {"light", "dark"}:
         raise HTTPException(400, "theme must be light or dark")
+    THEME_FILE.parent.mkdir(parents=True, exist_ok=True)
     THEME_FILE.write_text(preference.theme, encoding="utf-8")
     return {"theme": preference.theme}
 

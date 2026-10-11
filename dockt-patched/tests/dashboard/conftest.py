@@ -89,7 +89,7 @@ def dockt(tmp_path_factory):
                        cwd=ROOT, env=env, check=True, capture_output=True)
         wait_until(lambda: get_json(base + "/api/stats")["done"] == N_CAPTURES, 120, "indexing")
         wait_until(lambda: len(get_json(base + "/api/commitments?hours=48")["items"]) >= 3, 120, "promise extraction")
-        yield SimpleNamespace(base=base, logs=logs,
+        yield SimpleNamespace(base=base, logs=logs, data=data,
                               get=lambda path: get_json(base + path),
                               post=lambda path, body: post_json(base + path, body),
                               delete=lambda path: delete(base + path))
@@ -165,6 +165,7 @@ def dash(context, dockt):
     # chat history is shared through the local service now (/api/conversations), so start each test empty
     for c in dockt.get("/api/conversations"):
         dockt.delete("/api/conversations/" + urllib.parse.quote(c["id"], safe=""))
+    (dockt.data / "theme").unlink(missing_ok=True)   # and with no saved theme (it lives in DATA_DIR)
     d = Dash(context.new_page(), dockt.base)
     yield d
     assert not d.errors, f"uncaught JS errors: {d.errors}"
