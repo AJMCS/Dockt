@@ -129,7 +129,6 @@
   .src img { width: 46px; height: 29px; flex: none; object-fit: cover; object-position: top; border-radius: 6px; background: var(--img-bg); }
   .src span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .src b { color: var(--cite-text); font-weight: 600; }
-  .src.cited { border-color: var(--accent); }
   .src:hover { border-color: var(--accent); color: var(--text); }
   .src:focus-visible, .srcs-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .srcs-more { border: 0; background: none; padding: 4px 6px; color: var(--muted); font-size: 12.5px; cursor: pointer; border-radius: 8px; }
@@ -581,13 +580,15 @@ function showSources(items, cited = [], title = "Sources") {
   $("#sources").innerHTML = rows.length ? rows.map(r => card(r, cited.includes(r.id))).join("") : NO_SOURCES;
 }
 
-// The screenshots behind one response, as thumbnails under it (cited first). "+N more" shows them all in the panel.
+// The screenshots a response cites, as thumbnails under it, in citation order. "+N more" opens the side panel,
+// which also lists what was retrieved but not cited.
 const SRC_MAX = 6;
 function addSourceStrip(msg, items, cited = []) {
   msg._sources = items; msg._cited = cited;
-  const rows = [...items].sort((a, b) => cited.includes(b.id) - cited.includes(a.id));
-  const html = !rows.length ? `<span class="meta">No screenshots were used for this response.</span>` :
-    rows.slice(0, SRC_MAX).map(r => `<button class="src ${cited.includes(r.id) ? "cited" : ""}" data-id="${r.id}" title="${esc(r.app)}${r.title ? " — " + esc(r.title) : ""}">` +
+  const byId = new Map(items.map(r => [r.id, r]));
+  const rows = [...new Set(cited)].map(id => byId.get(id)).filter(Boolean);
+  const html = !rows.length ? `<span class="meta">No sources cited.</span>` :
+    rows.slice(0, SRC_MAX).map(r => `<button class="src" data-id="${r.id}" title="${esc(r.app)}${r.title ? " — " + esc(r.title) : ""}">` +
       `<img loading="lazy" src="/img/${r.id}" alt=""><span><b>#${r.id}</b> ${esc(r.app || "")}</span></button>`).join("") +
     (rows.length > SRC_MAX ? `<button class="srcs-more">+${rows.length - SRC_MAX} more</button>` : "");
   msg.querySelector(".srcs")?.remove();
@@ -883,8 +884,9 @@ document.addEventListener("click", async e => {
     const msg = bubble("bot draft", "");
     const draft = await doDraft(b.dataset.kind, ids, msg.querySelector(".text"));
     if (draft) {
-      addSourceStrip(msg, sources, ids);
-      messages.push({role: "assistant", content: draft, draft: true, sources: slim(sources), cited: ids});   // so "make it shorter" has context
+      const cited = ids.filter(id => (answer._cited || []).includes(id));   // drafted from uncited sources: none listed
+      addSourceStrip(msg, sources, cited);
+      messages.push({role: "assistant", content: draft, draft: true, sources: slim(sources), cited});   // so "make it shorter" has context
       saveChat();
     }
   } else {
@@ -925,16 +927,6 @@ $("#promises").addEventListener("click", async e => {
     } catch { box.checked = !box.checked; }
   }
 });
-// The screens a standup / timesheet is written from: the same period /api/standup reads (the workday so far;
-// before 6am, since yesterday), newest first. Only for showing them, so failures just mean no thumbnails.
-async function workdaySources() {
-  const now = new Date(), day = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  if (now.getHours() < 6) day.setDate(day.getDate() - 1);
-  try {
-    const rows = await api(`/api/browse?start=${day / 1000}&end=${now / 1000 + 60}&limit=200${devParam()}`);
-    return rows.filter(r => r.status === "done").sort((a, b) => b.ts - a.ts).slice(0, 40);
-  } catch { return []; }
-}
 document.addEventListener("click", async e => {
   const b = e.target.closest("button[data-standup]"); if (!b || busy) return;
   const ask = b.textContent;
@@ -948,9 +940,8 @@ document.addEventListener("click", async e => {
     box.innerHTML = md(r.text) + `<div class="actions"><button class="btn copy">Copy</button>` +
       (r.spans ? `<span class="meta">${r.spans} activity spans · ${r.captures ?? 0} captures</span>` : "") + `</div>`;
     box.querySelector(".copy").onclick = () => navigator.clipboard.writeText(r.text);
-    const sources = r.spans ? await workdaySources() : [];
-    addSourceStrip(msg, sources);
-    messages.push({role: "user", content: ask}, {role: "assistant", content: r.text, draft: true, sources: slim(sources)});
+    addSourceStrip(msg, []);   // a standup is written from the activity log and cites no screenshots
+    messages.push({role: "user", content: ask}, {role: "assistant", content: r.text, draft: true});
     saveChat();
   } catch {
     box.innerHTML = `<span class="hint">Couldn't read today's activity just now. Try again in a moment.</span>`;

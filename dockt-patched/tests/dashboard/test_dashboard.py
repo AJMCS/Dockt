@@ -98,7 +98,7 @@ def test_chat_streams_tokens_then_cites(dash):
     assert_cited_first(dash, ids)
     strip = dash.page.locator("#thread .msg.bot .srcs .src")
     assert strip.count() > 0, "every answer shows its sources under it"
-    assert strip.first.get_attribute("data-id") == ids[0], "cited sources come first"
+    assert strip.evaluate_all("els => els.map(e => e.dataset.id)") == ids, "only the cited sources, in citation order"
     assert " ms" not in dash.last_bot_text() and "moments retrieved" not in dash.page.inner_text("#thread"), "no timing in responses"
     strip.first.click()
     dash.page.wait_for_selector("#modal", state="visible")
@@ -214,7 +214,7 @@ def test_draft_from_answer(dash):
     last = dash.js("messages.at(-1)")
     assert last["role"] == "assistant" and last["draft"] is True
     draft_srcs = dash.page.locator("#thread .msg.bot.draft .srcs .src").evaluate_all("els => els.map(e => e.dataset.id)")
-    assert draft_srcs and set(draft_srcs) <= set(cited(dash)), "a draft shows the screenshots it was written from"
+    assert draft_srcs == cited(dash), "a draft lists the cited screenshots it was written from"
 
 
 def test_draft_failure_is_friendly(dash):
@@ -361,7 +361,8 @@ def test_standup_and_timesheet(dash, kind, label):
     assert [m["role"] for m in dash.js("messages")] == ["user", "assistant"]
     assert dash.page.is_enabled("#go")
     dash.page.wait_for_selector("#thread .msg.bot.draft .srcs")
-    assert dash.page.locator("#thread .msg.bot.draft .srcs .src").count() > 0, "a standup shows the screens it read"
+    assert dash.page.locator("#thread .msg.bot.draft .srcs .src").count() == 0, "a standup cites no screenshots"
+    assert "No sources cited" in dash.page.inner_text("#thread .msg.bot.draft .srcs")
     assert " ms" not in dash.page.inner_text("#thread .msg.bot.draft")
 
 
