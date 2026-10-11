@@ -48,6 +48,8 @@ class DashboardFlowTests(unittest.TestCase):
             patch.object(dockt_app.memory, "activity", return_value=([], 0, 0)),
             patch.object(dockt_app.models, "chat",
                          new=AsyncMock(return_value="Sam booked dinner at Nopalito for 8 PM [#42].")),
+            # Lane 3's /api/chat agent calls models.chat_messages: search first, then answer from the result
+            patch.object(dockt_app.models, "chat_messages", new=self._fake_chat_messages),
         ]
         for p in self.patches:
             p.start()
@@ -55,6 +57,13 @@ class DashboardFlowTests(unittest.TestCase):
         self.client_context = TestClient(dockt_app.app)
         self.client = self.client_context.__enter__()
         self.addCleanup(self.client_context.__exit__, None, None, None)
+
+    @staticmethod
+    async def _fake_chat_messages(messages, tools=None, **_):
+        if tools and not any(m["role"] == "tool" for m in messages):
+            return {"content": "", "tool_calls": [
+                {"id": "call_0", "name": "search_screens", "arguments": {"q": "dinner"}}]}
+        return {"content": "Sam booked dinner at Nopalito for 8 PM [#42].", "tool_calls": []}
 
     def _stop_patches(self):
         for p in reversed(self.patches):
