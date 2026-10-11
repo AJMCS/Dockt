@@ -134,7 +134,19 @@ async def extract_one(row, sem):
             memory.store.mark_extracted(row["id"], ok=True)  # don't retry forever; the capture is still searchable
 
 
+async def _warmup():
+    """Load the chat model into memory at startup so the first real /api/chat
+    isn't a 40-60s cold start. Best effort: a tiny tool-less turn, errors ignored."""
+    try:
+        t = time.time()
+        await _chat_messages([{"role": "user", "content": "ready?"}], None, max_tokens=1, temperature=0)
+        print(f"chat model warmed in {time.time() - t:.1f}s")
+    except Exception as e:
+        print(f"warmup skipped: {e!r}")
+
+
 async def extractor():
+    asyncio.create_task(_warmup())  # don't block the extractor loop on it
     sem = asyncio.Semaphore(EXTRACT_CONCURRENCY)
     inflight: set[asyncio.Task] = set()
     while True:
@@ -408,6 +420,10 @@ def _finish(answer, sources):
     answer = re.sub(r"\[(\d+)\]", lambda m: f"[#{m.group(1)}]" if int(m.group(1)) in sources else m.group(0),
                     answer)
     answer = re.sub(r"\s?\[#(\d+)\]", lambda m: m.group(0) if int(m.group(1)) in sources else "", answer)
+    # a "didn't see / nothing found" answer shouldn't carry citations, even if the model tacked some on
+    if re.search(r"didn'?t see|not(?:hing)? (?:found|on your screens)|no (?:requests?|results?|matching)",
+                 answer, re.I):
+        answer = re.sub(r"\s?\[#\d+\]", "", answer)
     cited = [i for i in dict.fromkeys(int(x) for x in re.findall(r"\[#(\d+)\]", answer)) if i in sources]
     ordered = [sources[i] for i in cited] + [r for i, r in sources.items() if i not in cited]
     return answer, cited, ordered[:max(12, len(cited))]
