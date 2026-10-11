@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import ctypes
 import sys
 import tempfile
@@ -721,3 +722,22 @@ class ListeningRecorderTests(unittest.TestCase):
             recorder = quickchat.new_recorder()
         self.assertIsInstance(recorder, quickchat.MicRecorder)
         self.assertFalse(hasattr(recorder, "levels"), "MCI can't hear levels, so stopping is by click")
+
+
+class MacSupportTests(unittest.TestCase):
+    def test_mac_launcher_matches_the_windows_one(self):
+        command = (ROOT / "start-dockt.command").read_bytes()
+        self.assertTrue(command.startswith(b"#!/bin/bash\n"))
+        self.assertNotIn(b"\r\n", command, "Windows line endings break the script on macOS (.gitattributes)")
+        text = command.decode("utf-8")
+        marker = re.search(r"\.dockt-deps-installed-v\d+", (ROOT / "start-dockt.bat").read_text(encoding="utf-8"))
+        self.assertIsNotNone(marker)
+        self.assertEqual(text.count(marker.group(0)), 2, "both launchers reinstall when requirements change")
+        for requirements in ("requirements-server.txt", "requirements-agent.txt", "requirements-desktop.txt"):
+            self.assertIn(requirements, text)
+        self.assertIn('exec .venv/bin/python desktop/dockt_desktop.py "$@"', text)
+
+    def test_pet_mic_off_windows_needs_sounddevice(self):
+        with patch.dict(sys.modules, {"sounddevice": None}), patch.object(quickchat.os, "name", "posix"):
+            with self.assertRaisesRegex(OSError, "sounddevice"):
+                quickchat.new_recorder()

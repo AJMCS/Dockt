@@ -81,7 +81,7 @@ Other settings:
 
 The launcher starts it. By hand: `python agent/capture.py --server http://127.0.0.1:8000 --name <device>`.
 
-- **Windows:** nothing to grant. **macOS:** allow *Screen Recording* and *Accessibility* (for window titles) for your terminal app, then restart the terminal.
+- **Windows:** nothing to grant. **macOS:** allow *Screen Recording*, *Accessibility* (for window titles) and *Microphone* (voice input) for your terminal app, then restart the terminal. Start everything with `start-dockt.command`.
 - Password managers (1Password, Bitwarden, KeePass, LastPass, Keychain Access) and private/incognito windows are always skipped; `--exclude` adds more. Pause anytime: create `~/.dockt_pause`, or use the pet's controls.
 - Service down? Frames spool to `~/.dockt_spool` and upload when it's back.
 

@@ -437,10 +437,12 @@ class StreamRecorder:
 
 
 def new_recorder():
-    """sounddevice when it's installed (hears when you stop talking), else Windows' MCI (click to stop)."""
+    """sounddevice when it's installed (hears when you stop talking, any OS), else Windows' MCI (click to stop)."""
     try:
         return StreamRecorder()
     except ImportError:
+        if os.name != "nt":
+            raise OSError("sounddevice isn't installed") from None
         return MicRecorder()
 
 
@@ -1316,6 +1318,12 @@ class QuickChat:
                 self.pet.attributes("-transparentcolor", self.pet_background)
             except tk.TclError:
                 self.pet_background = "#101318"
+        elif sys.platform == "darwin":
+            try:   # Tk on macOS has real per-pixel transparency: the robot's edges blend, nothing is keyed out
+                self.pet.attributes("-transparent", True)
+                self.pet_background = "systemTransparent"
+            except tk.TclError:
+                self.pet_background = "#101318"
         else:
             self.pet_background = "#101318"
         self.pet.configure(bg=self.pet_background)
@@ -1586,14 +1594,12 @@ class QuickChat:
             self._stop_voice()
 
     def _start_voice(self):
-        if os.name != "nt":
-            self._pet_say("Voice needs Windows", 3000)
-            return
         try:
             recorder = new_recorder()
             recorder.start()
         except (OSError, AttributeError) as exc:
-            self.status.set(f"Couldn't open the microphone ({exc}). Check Windows' microphone privacy settings.")
+            self.status.set(f"Couldn't open the microphone ({exc}). Check the microphone permission in your "
+                            "system's privacy settings.")
             self._pet_say("Mic not available", 4000)
             return
         self.recorder, self.voice_state = recorder, "recording"
