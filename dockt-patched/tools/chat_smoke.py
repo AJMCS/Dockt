@@ -26,6 +26,18 @@ TOOLS = [{
         },
     },
 }]
+# Nemotron 3 33B ignores a one-line "use tools" instruction and answers
+# "I don't have access to real-time data" instead (0/5 tool calls in testing).
+# Ollama also ignores tool_choice="required". A prompt that tells it what the
+# memory is and to search FIRST gets a tool call every time (3/3). Lane 3's real
+# agent prompt must be at least this explicit.
+SYSTEM = (
+    "You are Dockt, a private assistant with a searchable memory of everything the user "
+    "has seen on their computer screen today (Slack, email, calendar, docs, browser). "
+    "You can NOT answer from general knowledge. For every question, FIRST call "
+    "search_screens with a short keyword query, then answer only from the results, "
+    "citing each fact with its id like [#9]. If nothing relevant is found, say so."
+)
 QUESTION = "Where is dinner tonight?"
 TOOL_RESULT = "[#9] Sat 13:12 · Slack — #hackathon: Sam: dinner at Nopalito at 8, I booked for 4"
 
@@ -50,7 +62,7 @@ def messages_after_tool(messages, calls):
 
 async def non_stream_flow():
     messages = [
-        {"role": "system", "content": "Use tools to answer from screenshots."},
+        {"role": "system", "content": SYSTEM},
         {"role": "user", "content": QUESTION},
     ]
     first = await models.chat_messages(messages, tools=TOOLS)
@@ -63,7 +75,7 @@ async def non_stream_flow():
 
 async def stream_flow():
     messages = [
-        {"role": "system", "content": "Use tools to answer from screenshots."},
+        {"role": "system", "content": SYSTEM},
         {"role": "user", "content": QUESTION},
     ]
     first_stream = await models.chat_messages(messages, tools=TOOLS, stream=True)
