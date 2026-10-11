@@ -172,15 +172,15 @@ class QuickChatWidgetTests(unittest.TestCase):
             show.assert_called_once_with()
 
         with patch.object(app, "_toggle_voice") as voice, patch.object(app, "_show_options_at") as show_options:
-            app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=124)
-            app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=124)
+            app.pet_canvas.event_generate("<ButtonPress-1>", x=112, y=124)
+            app.pet_canvas.event_generate("<ButtonRelease-1>", x=112, y=124)
             root.update()
             voice.assert_not_called()
             show_options.assert_called_once()
             show_options.reset_mock()
             with patch.object(app, "_toggle_conversation") as talk:
-                app.pet_canvas.event_generate("<ButtonPress-1>", x=112, y=124)
-                app.pet_canvas.event_generate("<ButtonRelease-1>", x=112, y=124)
+                app.pet_canvas.event_generate("<ButtonPress-1>", x=80, y=124)
+                app.pet_canvas.event_generate("<ButtonRelease-1>", x=80, y=124)
                 root.update()
                 talk.assert_called_once_with()
             app.pet_canvas.event_generate("<Button-3>", x=80, y=70)   # options are on right-click

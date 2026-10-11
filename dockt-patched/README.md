@@ -24,8 +24,8 @@ node --test tests/test_dashboard_history.cjs
 
 ## Voice input and spoken replies (Windows)
 
-Hover over the desktop pet to see three buttons: quick chat, more options (three
-dots), and a single microphone for voice. Click the mic, speak your question,
+Hover over the desktop pet to see three buttons: quick chat, a single microphone for
+voice, and more options (three dots). Click the mic, speak your question,
 then click again to stop and ask. Dockt continues the current quick-chat
 conversation and reads the answer using Windows' built-in local voice. Click
 again while it is thinking or speaking to cancel, or press Esc in quick chat.

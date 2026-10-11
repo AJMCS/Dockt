@@ -1550,7 +1550,7 @@ class QuickChat:
                     _pet_control_image(*key), master=self.pet)
             return photos[key]
         canvas.create_image(26, 110, anchor="nw", image=photo("bar"), tags=("pet-control-bar",))
-        for name, center in (("chat", 48), ("menu", 80), ("mic", 112)):
+        for name, center in (("chat", 48), ("mic", 80), ("menu", 112)):
             active = self.pet_hover_button == name
             canvas.create_image(center - 12, 113, anchor="nw", image=photo(name, active),
                                 tags=("pet-control", f"pet-control-{name}"))
@@ -1581,9 +1581,9 @@ class QuickChat:
         if 36 <= x <= 60 and 112 <= y <= 136:
             return "chat"
         if 68 <= x <= 92 and 112 <= y <= 136:
-            return "menu"
-        if 100 <= x <= 124 and 112 <= y <= 136:
             return "mic"
+        if 100 <= x <= 124 and 112 <= y <= 136:
+            return "menu"
         return None
 
     def _pet_motion(self, event):
