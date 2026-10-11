@@ -1,111 +1,126 @@
 # Dockt — your workday, remembered. 100% local.
 
-Private screen memory for work, running on the ASUS GX10.
+If you're a lawyer, work in finance or healthcare, or are under an NDA, you can't paste your screen into a cloud AI. So your workday has no memory: the address someone mentioned in a chat, the invoice you glanced at, the thing you promised to send by Monday.
+
+**Dockt gives you that memory, and none of it leaves the room.** Your laptop keeps every screenshot and the search index. An ASUS Ascent GX10 on the local network reads each screenshot for a second or two, answers your questions, and stores nothing. The cloud never hears about it.
+
+> Your laptop remembers. The box in the room thinks. The cloud never hears about it.
+
+Built in one weekend for the **ASUS Local AI track of the UCSC AI Hackathon** (October 2026).
+
+---
+
+## What it does
+
+- **Remembers what you saw.** A capture agent takes a screenshot only when your screen changes to something new. The check costs about 2 ms on a tiny thumbnail, so an idle screen sends nothing. Password managers and private or incognito windows are always skipped, and you can pause capture at any time.
+- **Answers with proof.** Ask "Where is dinner tonight and who booked it?" The answer streams in, and every claim cites the screenshot it came from as a chip like `#9`. Click the chip to see the exact pixels, the model's summary and the text on screen. If it isn't on your screens, it says so instead of guessing.
+- **Keeps track of what you promised.** While you work, Dockt pulls promises, deadlines and requests from your screen ("I'll send the revised NDA by Monday") into a checklist, each linked to its screenshot.
+- **Acts on it.** Draft a follow-up email or message from any answer or screenshot. Write your standup, or draft a timesheet from what you actually did today.
+- **Feels like an app, not a website.** A desktop window with chat history in a Claude-style sidebar, light and dark themes, and a quick-chat pet on your desktop (`Ctrl+Space` from anywhere).
+
+## How it works
 
 ```
-laptops (agent/capture.py)  --LAN-->  GX10 (server/app.py)
- screenshot every 3s                    save JPEG -> queue
- skip unchanged frames                  vision model: summary + screen text
- spool to disk if server down           embedding model -> vectors
-                                        SQLite FTS5 (keywords) + numpy (vectors)
-                                        Nemotron: ask / draft follow-ups
-                                        web UI at http://<gx10-ip>:8000
+ ┌──────────────── your laptop (Windows) ─────────────────┐        ┌──────── ASUS GX10 (in the room) ────────┐
+ │                                                        │        │                                         │
+ │  capture agent ── screenshot on change ──► local Dockt │  LAN   │  Ollama, three models always loaded:    │
+ │                                             service    │ ─────► │   gemma4:26b       reads screenshots    │
+ │  desktop app + quick-chat ◄── answers ──── 127.0.0.1   │ ◄───── │   nemotron3:33b    tool-calling agent   │
+ │                                              :8000     │        │   nomic-embed-text search vectors       │
+ │  screenshots + SQLite index live here, nowhere else    │        │  stores nothing                         │
+ └────────────────────────────────────────────────────────┘        └─────────────────────────────────────────┘
 ```
 
-All three models are reached through OpenAI-compatible URLs, so moving from a
-laptop to the GX10 is just changing env vars.
+1. **Capture.** The agent posts a JPEG to the local service on the laptop, which saves it there.
+2. **Understand.** The laptop sends the image to the GX10's vision model, which returns a summary and the screen text. The embedding model turns that into a vector. Both are stored in the laptop's SQLite database, which uses FTS5 for keyword search.
+3. **Ask.** A tool-calling agent running Nemotron 3 on the GX10 decides what to look up: it can search your screens, read your activity for a time range, open specific captures, list your promises or write a draft. It answers only from what it found, citing every claim as `[#id]`.
+4. **Watch for promises.** A background extractor reads new captures for promises, deadlines and requests.
 
-## 1. Tonight: run everything on one laptop
+**Measured on the GX10:**
+- About 1.5 s to read a simple screenshot, about 5.6 s for a dense one.
+- About 28 screenshots/min end to end, with promise extraction running.
+- Answers in about 3 s.
+- All three models stay resident in about 54 GB of the 128 GB unified memory.
+
+**Privacy, by design:**
+- The local service only listens on `127.0.0.1`.
+- Screenshots and the index never leave the laptop. The GX10 sees an image only while describing it.
+- The dashboard loads no fonts, scripts or icons from the internet. A regression test fails if it makes any request off the laptop.
+- To prove it in the demo, we unplug the router's internet uplink and everything keeps working.
+
+## Run it
+
+**Windows (the demo setup).** You need Python 3.11+. From `dockt-patched/`:
+
+```powershell
+echo 192.168.8.10> gx10.txt        # your GX10's address (or set DOCKT_GX10)
+start-dockt.bat                     # first run sets up .venv; add --mock to run without a GX10
+```
+
+On campus Wi-Fi, where the GX10's port can't be reached directly, run `desktop\Setup-GX10.bat` once instead; Dockt then reaches the GX10 through an SSH tunnel.
+
+This starts the local service, screen capture and the quick-chat pet. Right-click the pet for controls: **Open Dashboard**, pause or resume capture, and **Quit Dockt**. Click the pet or press `Ctrl+Space` to ask a quick question. Closing the dashboard window hides it; Quit ends everything.
+
+**Developing on macOS/Linux (mock models, no GX10 needed):**
 
 ```bash
-pip install -r requirements-server.txt -r requirements-agent.txt
-
-# Option A — no models at all (tests plumbing + UI)
-cd tools && uvicorn mock_models:app --port 9000 &
-cd ../server && VLM_URL=http://localhost:9000/v1 uvicorn app:app --port 8000
-
-# Option B — real models via Ollama
-ollama pull qwen2.5vl:7b && ollama pull nomic-embed-text && ollama pull nemotron-mini
-cd server && uvicorn app:app --port 8000     # defaults point at Ollama
-
-# feed it data
-python tools/replay.py --server http://localhost:8000 --synthetic 40
-python agent/capture.py --server http://localhost:8000 --name me
+cd dockt-patched
+python3 -m venv .venv && .venv/bin/pip install -r requirements-server.txt -r requirements-agent.txt
+.venv/bin/uvicorn --app-dir tools mock_models:app --port 9000 &                 # mock models
+VLM_URL=http://127.0.0.1:9000/v1 .venv/bin/python server/app.py &               # local service on :8000
+.venv/bin/python tools/replay.py --server http://127.0.0.1:8000 --synthetic 24   # fake screenshots
+open http://127.0.0.1:8000                                                       # the dashboard
 ```
-Open http://localhost:8000.
 
-## 2. Saturday: GX10
+More detail, including env vars, capture tuning and the demo checklist, is in [`dockt-patched/README.md`](dockt-patched/README.md).
 
-Serve each model on its own port (vLLM in the NVIDIA container from the Spark
-playbook). Memory is unified, so the `--gpu-memory-utilization` values must add
-up to well under 1.0 — leave room for the OS and the server.
+## Tests
 
 ```bash
-# vision (port 8001)
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct --port 8001 --gpu-memory-utilization 0.30 \
-  --max-model-len 8192 --limit-mm-per-prompt '{"image":1}'
-# embeddings (port 8002) — flag is --task embed on older vLLM, --runner pooling on newer
-vllm serve BAAI/bge-m3 --port 8002 --task embed --gpu-memory-utilization 0.08
-# Nemotron (port 8003) — or whatever NVIDIA preloaded; Ollama is fine too
-vllm serve <nemotron-model-id> --port 8003 --gpu-memory-utilization 0.35
+cd dockt-patched
+.venv/bin/pip install -r requirements-test.txt
+.venv/bin/python -m pytest tests -q
 ```
 
-```bash
-export VLM_URL=http://localhost:8001/v1 VLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
-export EMBED_URL=http://localhost:8002/v1 EMBED_MODEL=BAAI/bge-m3
-export LLM_URL=http://localhost:8003/v1   LLM_MODEL=<nemotron-model-id>
-export DOCKT_TOKEN=pick-something INGEST_CONCURRENCY=16
-cd server && uvicorn app:app --host 0.0.0.0 --port 8000
-```
+The suite has 89 tests. It starts its own mock models and Dockt service on free ports with a throwaway data folder, then drives the dashboard in a real browser. It covers:
+- streaming answers and citation rules
+- failure paths
+- drafts and the screenshot modal
+- deep links
+- promises, standup and timesheet
+- the timeline
+- chat history, including with the GX10 down
+- the on-device badge
+- both themes, including contrast checks
+- layout from phone to projector size
+- the desktop app and the local API
 
-**Benchmark first (by noon):**
-```bash
-python tools/bench.py --url http://localhost:8001/v1 --model Qwen/Qwen2.5-VL-7B-Instruct
-```
-Indexed img/min must beat total incoming captures/min (the header shows both).
-If it doesn't: raise `--interval` to 5s, capture on fewer laptops, or lower
-`--max-width` to 1280.
+See [`dockt-patched/tests/dashboard/README.md`](dockt-patched/tests/dashboard/README.md).
 
-If the vision model dies, `VLM_ENABLED=0` keeps the app working on window
-titles alone.
+## How we built it
 
-If you switch embedding models after indexing, old vectors won't match: keyword
-search still works, but start from an empty `DATA_DIR` for vector search.
+Four people, four lanes, black-box contracts. Each lane owned its files and talked to the others only through the HTTP and Python interfaces in [`TEAM.md`](dockt-patched/TEAM.md) §3, so all four could build in parallel against mocks.
 
-## 3. Laptops
+| Lane | Owner | What | Where |
+|---|---|---|---|
+| 1. Capture + desktop client | Rik Ros | capture agent, quick-chat pet, Windows launcher | `agent/`, `start-dockt.bat` |
+| 2. App | Brandon Shen | dashboard, desktop window, design system, regression tests | `server/static/`, `desktop/`, `tests/dashboard/`, [`team/DESIGN.md`](dockt-patched/team/DESIGN.md) |
+| 3. Agent | cyshello | tool-calling `/api/chat` agent, drafts, standup, promise extraction | `server/brain.py` |
+| 4. Models + memory | AJ McDaniel | GX10 model serving, model client, search, indexer, mocks | `server/models.py`, `store.py`, `memory.py`, `indexer.py`, `tools/` |
 
-```bash
-pip install -r requirements-agent.txt
-python agent/capture.py --server http://<gx10-ip>:8000 --name brandon --token pick-something
-```
-- **macOS:** System Settings → Privacy & Security → *Screen Recording* (required)
-  and *Accessibility* (window titles) for your terminal app, then restart it.
-- **Windows:** nothing to grant. Use `py` instead of `python` if needed.
-- Password managers and private/incognito windows are skipped by default
-  (`--exclude` adds more). Pause anytime: create `~/.dockt_pause`.
-- Server down? Frames spool to `~/.dockt_spool` and upload when it's back.
+**Stack:**
+- **Laptop:** FastAPI, SQLite FTS5 and NumPy vectors, pywebview (WebView2 on Windows), plain HTML/JS for the dashboard.
+- **GX10:** Ollama's OpenAI-compatible API.
 
-**When it captures:** the agent checks a tiny thumbnail every second (~2 ms) and
-only sends a frame when the screen settles on something new, right after an
-app/window switch, or every 30s while something keeps moving (e.g. video). An
-idle screen sends nothing. "New" is relative to how busy the screen normally is.
-- Too many captures? Raise `--sensitivity` (default 3) or `--floor` (default 6).
-- Missing things? Lower them. Run with `--debug` to watch the numbers live.
-- `--min-gap 2` / `--max-gap 30` cap how often/rarely it sends.
+**Challenges:**
+- Thinking models returned empty answers through Ollama until we sent `reasoning_effort: "none"`.
+- Nemotron cited `[9]` instead of `[#9]`, so both the agent and the UI accept either form.
+- Windows-first details: no `tzset`, and cp1252 encodings.
+- Keeping capture from every laptop under what the GX10 can read per minute.
 
-## 4. Demo checklist
-- Plant 2–3 moments Saturday (a Slack message with a restaurant, a phone number
-  in a doc, a flight price) and rehearse the exact questions.
-- Ask → click a citation → "Draft follow-up email". That's the differentiator.
-- Offline proof: unplug the **router's internet uplink** (WAN), not the
-  laptop↔GX10 cable. Everything keeps working.
-- Backup: keep a folder of good screenshots; `tools/replay.py --folder` loads them.
-
-## API
-| | |
-|---|---|
-| `POST /ingest` | multipart: image, device, ts, app, title (+ `X-Dockt-Token`) |
-| `GET /api/search?q=&k=&device=` | hybrid semantic + keyword search |
-| `POST /api/ask {q}` | Nemotron answer with `[#id]` citations |
-| `POST /api/draft {ids, kind}` | kind = email / message / todo / notes |
-| `GET /api/browse`, `/api/timeline`, `/api/stats`, `/api/health`, `/img/{id}` | |
+**What's next:**
+- Voice questions: local Whisper transcription is wired on the server but not in the app yet.
+- Proactive nudges ("the redline is due tomorrow").
+- An end-of-day summary.
+- Retention controls.
+- Several devices feeding one memory: the index already keys every capture by device.
