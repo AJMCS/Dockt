@@ -240,6 +240,7 @@ def test_chip_opens_modal_with_evidence(dash):
 
 def test_source_card_opens_modal_and_hover_highlights(dash):
     dash.open().ask("where is dinner tonight")
+    open_pane(dash, "sources")   # the panel starts closed
     target = cited(dash)[-1]
     dash.page.locator(f"#thread .cite[data-id='{target}']").hover()
     assert dash.page.locator("#sources .card.hl").get_attribute("data-id") == target
@@ -578,14 +579,16 @@ def test_composer_pinned_to_bottom(dash):
 
 def test_panels_are_tabs_like_artifacts(dash):
     """Sources, Promises and Timeline are all tabs: the open one is highlighted; clicking it again (or the panel's
-    x) closes the panel and gives the chat the full width. Wide windows start on Sources."""
+    x) closes the panel and gives the chat the full width. The panel starts closed, Sources included."""
     dash.open().ask("where is dinner tonight")
     pane_w = lambda: dash.page.locator("#pane").bounding_box()["width"]
     chat_w = lambda: dash.page.locator(".chat").bounding_box()["width"]
     visible = lambda v: dash.page.locator(f"#pane [data-view={v}]").is_visible()
     is_on = lambda v: "on" in dash.page.locator(f".tab[data-pane={v}]").get_attribute("class").split()
     assert dash.page.locator(".tab[data-pane=sources]").is_visible()
-    assert visible("sources") and is_on("sources"), "wide windows open on Sources, shown as the active tab"
+    assert not dash.js("paneVisible()") and dash.page.locator(".tab.on").count() == 0, "starts closed"
+    open_pane(dash, "sources")
+    assert visible("sources") and is_on("sources")
     assert dash.page.inner_text("#srcCount") == str(dash.page.locator("#sources .card").count())
     sources_w, with_panel = pane_w(), chat_w()
     open_pane(dash, "promises")
@@ -608,6 +611,7 @@ def test_panels_are_tabs_like_artifacts(dash):
 @pytest.mark.viewport(1440, 900)
 def test_sources_panel_resizes_by_dragging_its_edge(dash):
     dash.open().ask("where is dinner tonight")
+    open_pane(dash, "sources")
     pane_w = lambda: round(dash.page.locator("#pane").bounding_box()["width"])
     card_w = lambda: dash.page.locator("#sources .card img").first.bounding_box()["width"]
     start, thumb = pane_w(), card_w()
@@ -622,7 +626,7 @@ def test_sources_panel_resizes_by_dragging_its_edge(dash):
     dash.page.mouse.move(x - 2000, y)   # the chat always keeps a usable column
     assert dash.page.locator(".chat").bounding_box()["width"] >= 400
     dash.page.reload()
-    dash.page.wait_for_selector("#pane [data-view=sources]", state="visible")
+    open_pane(dash, "sources")
     assert pane_w() >= start + 300, "the width is remembered"
     open_pane(dash, "promises")
     dash.page.wait_for_timeout(300)
@@ -794,3 +798,72 @@ def test_voice_input_failures_are_friendly(dash, failure):
     dash.page.wait_for_function(f"document.querySelector('#q').placeholder.includes({json.dumps(expected)})")
     assert dash.page.input_value("#q") == "" and dash.page.is_enabled("#mic")
     assert "Error" not in dash.page.get_attribute("#q", "placeholder")
+
+
+# end of speech: the dashboard's EndOfSpeech must make the same calls as the pet's (agent/quickchat.py)
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+from agent.quickchat import EndOfSpeech  # noqa: E402
+
+SPEECH_CASES = {
+    "room, speech, quiet": [0.001] * 4 + [0.08] * 12 + [0.001] * 20,
+    "noisy room": [0.01] * 4 + [0.12] * 15 + [0.01] * 20,
+    "talks at once": [0.001] + [0.08] * 40 + [0.001] * 20,
+    "pauses mid-sentence": [0.001] * 4 + ([0.06] * 20 + [0.001] * 8) * 4 + [0.001] * 15,
+    "a click, then nothing": [0.001] * 3 + [0.2] + [0.001] * 96,
+    "silence": [0.001] * 100,
+}
+
+
+def _python_verdict(levels):
+    detector = EndOfSpeech()
+    for i, level in enumerate(levels):
+        verdict = detector.feed(level, 100)
+        if verdict:
+            return [verdict, (i + 1) * 100]
+    return [None, len(levels) * 100]
+
+
+def test_end_of_speech_matches_the_pets_rules(dash):
+    dash.open()
+    for name, levels in SPEECH_CASES.items():
+        page_verdict = dash.page.evaluate("""levels => {
+          const d = new EndOfSpeech();
+          for (let i = 0; i < levels.length; i++) { const v = d.feed(levels[i], 100); if (v) return [v, (i + 1) * 100]; }
+          return [null, levels.length * 100];
+        }""", levels)
+        assert page_verdict == _python_verdict(levels), name
+    assert _python_verdict(SPEECH_CASES["silence"])[0] == "silent"
+    assert _python_verdict(SPEECH_CASES["room, speech, quiet"]) == ["done", 2800]
+
+
+# A real audio stream for the page's level meter: an oscillator the test turns up ("speech") and down.
+SPEAKING_MIC = MIC_STUB.replace(
+    "    return {getTracks: () => [track]};",
+    "    const ctx = new AudioContext(), tone = ctx.createOscillator(), gain = ctx.createGain();\n"
+    "    gain.gain.value = 0;\n"
+    "    tone.connect(gain);\n"
+    "    const out = ctx.createMediaStreamDestination();\n"
+    "    gain.connect(out);\n"
+    "    tone.start();\n"
+    "    window.__mic.gain = gain.gain;\n"
+    "    out.stream.getTracks().forEach(t => { const stop = t.stop.bind(t);"
+    " t.stop = () => { window.__mic.tracksStopped++; stop(); }; });\n"
+    "    return out.stream;")
+assert SPEAKING_MIC != MIC_STUB
+
+
+def test_voice_input_stops_by_itself_when_you_stop_talking(dash):
+    dash.page.add_init_script(SPEAKING_MIC)
+    dash.open()
+    dash.page.click("#mic")
+    dash.page.wait_for_function(RECORDING)
+    assert "stops when you're done" in dash.page.get_attribute("#q", "placeholder")
+    dash.page.wait_for_timeout(500)           # the room (silence) is measured first
+    dash.js("__mic.gain.value = 0.3")         # talk...
+    dash.page.wait_for_timeout(900)
+    assert dash.js(RECORDING), "still listening while you talk"
+    dash.js("__mic.gain.value = 0")           # ...then stop: it should end the recording on its own
+    dash.page.wait_for_function("document.querySelector('#q').value === 'mock transcript'", timeout=6000)
+    assert not dash.js(RECORDING) and dash.js("__mic.tracksStopped") >= 1

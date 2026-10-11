@@ -132,6 +132,9 @@ class QuickChatWidgetTests(unittest.TestCase):
         app._draw_pet()
         self.assertFalse(any(app.pet_canvas.type(item) == "text" for item in app.pet_canvas.find_all()))
         bounds = app.pet_canvas.bbox("all")
+        if bounds is None:   # the robot is in its own smooth window; the canvas only holds hover controls
+            self.assertIsNotNone(app.pet_body)
+            bounds = (0, 0, round(quickchat.PET_SIZE * app.ui_scale), round(quickchat.PET_SIZE * app.ui_scale))
         self.assertGreaterEqual(bounds[0], 0)
         self.assertGreaterEqual(bounds[1], 0)
         self.assertLessEqual(bounds[2], 160*app.ui_scale)
@@ -248,7 +251,8 @@ class QuickChatWidgetTests(unittest.TestCase):
         root.update()
         recorder = Mock()
         recorder.stop.return_value = b"RIFF-wav"
-        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
+        recorder.levels.return_value = []   # hears nothing yet: stopping is up to the clicks
+        with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight") as upload,                 patch.object(app, "_focus_entry"):
             app._pet_hint(True)
             for _ in range(2):   # click the mic to start, click again to stop
                 app.pet_canvas.event_generate("<ButtonPress-1>", x=96, y=124)
@@ -277,8 +281,9 @@ class QuickChatWidgetTests(unittest.TestCase):
         root.update()
         recorder = Mock()
         recorder.stop.return_value = b"RIFF-wav"
+        recorder.levels.return_value = []   # hears nothing yet: stopping is up to the clicks
         error = quickchat.VoiceError("Voice isn't set up", "Voice input isn't set up on this Dockt yet.")
-        with patch.object(quickchat, "MicRecorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", side_effect=error):
+        with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "transcribe_audio", side_effect=error):
             app._toggle_voice()
             app._toggle_voice()
             for _ in range(50):
@@ -289,4 +294,68 @@ class QuickChatWidgetTests(unittest.TestCase):
         self.assertEqual(app.pet_notice, "Voice isn't set up")
         self.assertEqual(app.status.get(), "Voice input isn't set up on this Dockt yet.")
         self.assertEqual(app.chat.state(), "withdrawn", "nothing to show in the chat")
+
+    def _record_with_levels(self, app, root, levels):
+        """Start the pet mic on a fake recorder that hears `levels` (one per 100 ms), and run Tk until it's idle."""
+        recorder = Mock()
+        recorder.stop.return_value = b"RIFF-wav"
+        blocks = list(levels)
+        recorder.levels.side_effect = lambda: [blocks.pop(0)] if blocks else []
+        app._start_voice()
+        for _ in range(400):
+            root.update()
+            if app.voice_state != "recording":
+                break
+            time.sleep(0.01)
+        return recorder
+
+    def test_pet_mic_stops_by_itself_when_the_speaker_is_done(self):
+        root, app = self.make_app(96/72)
+        app.hide()
+        with patch.object(quickchat, "new_recorder", side_effect=lambda: recorder_holder[0]),                 patch.object(quickchat, "transcribe_audio", return_value="where is dinner tonight"),                 patch.object(quickchat, "VOICE_TICK_MS", 5), patch.object(app, "_focus_entry"):
+            speech = [0.001] * 4 + [0.08] * 12 + [0.001] * 20   # room, about a second of speech, then quiet
+            recorder_holder = [None]
+            recorder = Mock()
+            recorder.stop.return_value = b"RIFF-wav"
+            recorder.levels.side_effect = lambda: [speech.pop(0)] if speech else []
+            recorder_holder[0] = recorder
+            app._start_voice()
+            for _ in range(400):
+                root.update()
+                if app.voice_state == "idle" and app.entry.get("1.0", "end-1c") == "where is dinner tonight":
+                    break
+                time.sleep(0.01)
+        recorder.stop.assert_called_once_with()   # no second click needed
+        self.assertEqual(app.entry.get("1.0", "end-1c"), "where is dinner tonight")
+        self.assertGreaterEqual(len(speech), 7, "it stops after 1.2 s of quiet, not at the end of the input")
+
+    def test_pet_mic_gives_up_when_nobody_speaks(self):
+        root, app = self.make_app(96/72)
+        recorder = Mock()
+        recorder.levels.side_effect = lambda: [0.001]
+        with patch.object(quickchat, "new_recorder", return_value=recorder),                 patch.object(quickchat, "VOICE_TICK_MS", 1):
+            app._start_voice()
+            for _ in range(2000):
+                root.update()
+                if app.voice_state == "idle":
+                    break
+                time.sleep(0.001)
+        self.assertEqual(app.voice_state, "idle")
+        recorder.cancel.assert_called_once_with()
+        recorder.stop.assert_not_called()
+        self.assertEqual(app.pet_notice, "Didn't hear anything")
+
+    def test_pet_body_has_smooth_edges_on_windows(self):
+        root, app = self.make_app(96/72)
+        if app.pet_body is None:
+            self.skipTest("per-pixel-alpha body needs Windows")
+        app.pet.geometry("160x140+10000+10000")
+        app.pet.deiconify()
+        root.update()
+        app._draw_pet()
+        frame = next(iter(app._pet_smooth.values()))
+        alpha = bytes(frame[3::4])
+        partial = sum(1 for a in alpha if 0 < a < 255)
+        self.assertGreater(partial, 100, "edges are blended (partly transparent), not cut to fully on/off")
+        self.assertFalse(app.pet_canvas.find_withtag("pet-body"), "the robot isn't also drawn on the keyed canvas")
 

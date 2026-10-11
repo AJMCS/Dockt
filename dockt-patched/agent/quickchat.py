@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import wave
 import tkinter as tk
 import customtkinter as ctk
 from tkinter import ttk
@@ -23,6 +24,7 @@ from urllib.request import Request, urlopen
 import webbrowser
 import uuid
 
+import numpy as np
 from PIL import Image, ImageTk
 
 BASE_URL = os.environ.get("DOCKT_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -338,6 +340,110 @@ class MicRecorder:
             pass
 
 
+class EndOfSpeech:
+    """Decides when someone has finished speaking, from the loudness (RMS, 0..1) of each block of audio.
+    The room's noise floor is measured in the first 300 ms after the click (before anyone starts talking)
+    and only ever moves down after that, so speech can't raise it. The dashboard's mic uses the same
+    rules (EndOfSpeech in server/static/index.html)."""
+    CALIBRATE_MS = 300     # listen to the room first
+    SILENCE_MS = 1200      # this much quiet after speech means they're done
+    MIN_SPEECH_MS = 250    # ...but only once there's been this much speech (a cough or click isn't a question)
+    NO_SPEECH_MS = 8000    # nothing said at all: give up
+
+    def __init__(self):
+        self.floor = None
+        self.calibration: list[float] = []
+        self.history: list[float] = []
+        self.elapsed = self.speech = self.quiet = 0
+
+    def feed(self, rms: float, ms: int) -> str | None:
+        """None while listening, "done" when speech has ended, "silent" if nobody spoke."""
+        self.elapsed += ms
+        self.history.append(rms)
+        if self.floor is None:
+            self.calibration.append(rms)
+            if self.elapsed < self.CALIBRATE_MS:
+                return None
+            self.floor = min(max(sorted(self.calibration)[len(self.calibration) // 2], 0.0003), 0.03)
+        quieter = max(rms, 0.0003)
+        if quieter < self.floor:   # a quieter moment means the room is quieter than measured: if they were
+            self.floor = quieter   # already talking during the measurement, count that speech after all
+            loud = max(self.floor * 3, self.floor + 0.004, 0.006)
+            self.speech = ms * sum(1 for level in self.history[:-1] if level >= loud)
+        loud = max(self.floor * 3, self.floor + 0.004, 0.006)
+        if rms >= loud:
+            self.speech += ms
+            self.quiet = 0
+        elif rms < loud * 0.7:
+            self.quiet += ms
+        if self.speech >= self.MIN_SPEECH_MS and self.quiet >= self.SILENCE_MS:
+            return "done"
+        if self.speech < self.MIN_SPEECH_MS and self.elapsed >= self.NO_SPEECH_MS:
+            return "silent"
+        return None
+
+
+class StreamRecorder:
+    """Records the default microphone through sounddevice (PortAudio) as 16 kHz mono 16-bit, and reports
+    each 100 ms block's loudness so EndOfSpeech can stop the recording when the speaker is done."""
+    RATE, BLOCK = 16000, 1600
+
+    def __init__(self):
+        import sounddevice   # imported here: new_recorder() falls back to MicRecorder if it's missing
+        self.sd = sounddevice
+        self.stream = None
+        self.chunks: list[bytes] = []
+        self.pending: "queue.SimpleQueue[float]" = queue.SimpleQueue()
+
+    def _block(self, data, _frames, _time, _status):
+        self.chunks.append(bytes(data))
+        self.pending.put(float(np.sqrt(np.mean((data.astype(np.float32) / 32768) ** 2))))
+
+    def start(self):
+        try:
+            self.stream = self.sd.InputStream(samplerate=self.RATE, channels=1, dtype="int16",
+                                              blocksize=self.BLOCK, callback=self._block)
+            self.stream.start()
+        except Exception as exc:   # PortAudioError: no input device, device busy...
+            self.cancel()
+            raise OSError(str(exc)) from exc
+
+    def levels(self) -> list[float]:
+        out = []
+        while True:
+            try:
+                out.append(self.pending.get_nowait())
+            except queue.Empty:
+                return out
+
+    def stop(self) -> bytes:
+        self.cancel()
+        buffer = BytesIO()
+        with wave.open(buffer, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.RATE)
+            w.writeframes(b"".join(self.chunks))
+        return buffer.getvalue()
+
+    def cancel(self):
+        stream, self.stream = self.stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+
+
+def new_recorder():
+    """sounddevice when it's installed (hears when you stop talking), else Windows' MCI (click to stop)."""
+    try:
+        return StreamRecorder()
+    except ImportError:
+        return MicRecorder()
+
+
 def transcribe_audio(wav: bytes) -> str:
     """POST a WAV to the local service's /api/transcribe (Whisper at STT_URL) and return the text."""
     boundary = uuid.uuid4().hex
@@ -358,6 +464,108 @@ def transcribe_audio(wav: bytes) -> str:
 
 
 VOICE_LIMIT_MS = 60000
+VOICE_TICK_MS = 100    # how often the pet checks the recorder for new loudness readings
+VOICE_BLOCK_MS = 100   # each reading covers one StreamRecorder block (1600 samples at 16 kHz)
+
+
+class LayeredWindow:
+    """A borderless window that shows an RGBA image with real per-pixel transparency (UpdateLayeredWindow).
+    The pet window itself is made transparent with a colour key, which is all-or-nothing per pixel and
+    leaves jagged edges on light backgrounds; this window blends the robot's anti-aliased edges instead.
+    Windows only; QuickChat falls back to drawing the robot on the pet's canvas if it can't be created."""
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x80000, 0x80, 0x08000000
+
+    class _Blend(ctypes.Structure):
+        _fields_ = [("op", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("alpha", ctypes.c_ubyte),
+                    ("format", ctypes.c_ubyte)]
+
+    class _Header(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("width", ctypes.c_long), ("height", ctypes.c_long),
+                    ("planes", wintypes.WORD), ("bits", wintypes.WORD), ("compression", wintypes.DWORD),
+                    ("image_size", wintypes.DWORD), ("xppm", ctypes.c_long), ("yppm", ctypes.c_long),
+                    ("used", wintypes.DWORD), ("important", wintypes.DWORD)]
+
+    def __init__(self, master):
+        self.user32, self.gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+        for name, res, args in (("GetDC", wintypes.HDC, (wintypes.HWND,)),
+                                ("ReleaseDC", ctypes.c_int, (wintypes.HWND, wintypes.HDC)),
+                                ("GetAncestor", wintypes.HWND, (wintypes.HWND, wintypes.UINT)),
+                                ("GetWindowLongW", ctypes.c_long, (wintypes.HWND, ctypes.c_int)),
+                                ("SetWindowLongW", ctypes.c_long, (wintypes.HWND, ctypes.c_int, ctypes.c_long)),
+                                ("UpdateLayeredWindow", wintypes.BOOL,
+                                 (wintypes.HWND, wintypes.HDC, ctypes.c_void_p, ctypes.c_void_p, wintypes.HDC,
+                                  ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD))):
+            fn = getattr(self.user32, name)
+            fn.restype, fn.argtypes = res, args
+        for name, res, args in (("CreateCompatibleDC", wintypes.HDC, (wintypes.HDC,)),
+                                ("DeleteDC", wintypes.BOOL, (wintypes.HDC,)),
+                                ("CreateDIBSection", wintypes.HBITMAP,
+                                 (wintypes.HDC, ctypes.c_void_p, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p),
+                                  wintypes.HANDLE, wintypes.DWORD)),
+                                ("SelectObject", wintypes.HGDIOBJ, (wintypes.HDC, wintypes.HGDIOBJ)),
+                                ("DeleteObject", wintypes.BOOL, (wintypes.HGDIOBJ,))):
+            fn = getattr(self.gdi32, name)
+            fn.restype, fn.argtypes = res, args
+        self.top = tk.Toplevel(master)
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.top.update_idletasks()
+        self.hwnd = self.user32.GetAncestor(wintypes.HWND(self.top.winfo_id()), 2) or self.top.winfo_id()
+        style = self.user32.GetWindowLongW(self.hwnd, -20)   # GWL_EXSTYLE
+        self.user32.SetWindowLongW(self.hwnd, -20,
+                                   style | self.WS_EX_LAYERED | self.WS_EX_TOOLWINDOW | self.WS_EX_NOACTIVATE)
+        self.size = (0, 0)
+
+    @staticmethod
+    def premultiplied_bgra(image: Image.Image) -> bytes:
+        rgba = np.asarray(image.convert("RGBA"), dtype=np.uint16)
+        alpha = rgba[..., 3:4]
+        bgr = (rgba[..., 2::-1] * alpha + 127) // 255
+        return np.concatenate([bgr, alpha], axis=2).astype(np.uint8).tobytes()
+
+    def show(self, bgra: bytes, width: int, height: int, x: int, y: int) -> bool:
+        """Put a premultiplied BGRA image on screen at (x, y) physical pixels."""
+        screen = self.user32.GetDC(None)
+        memory = self.gdi32.CreateCompatibleDC(screen)
+        header = self._Header(ctypes.sizeof(self._Header), width, -height, 1, 32, 0, 0, 0, 0, 0, 0)
+        bits = ctypes.c_void_p()
+        bitmap = self.gdi32.CreateDIBSection(memory, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
+        try:
+            if not bitmap or not bits.value:
+                return False
+            ctypes.memmove(bits, bgra, len(bgra))
+            previous = self.gdi32.SelectObject(memory, bitmap)
+            point, origin = wintypes.POINT(x, y), wintypes.POINT(0, 0)
+            size = wintypes.SIZE(width, height)
+            blend = self._Blend(0, 0, 255, 1)   # AC_SRC_OVER, opaque, AC_SRC_ALPHA
+            ok = bool(self.user32.UpdateLayeredWindow(self.hwnd, screen, ctypes.byref(point), ctypes.byref(size),
+                                                      memory, ctypes.byref(origin), 0, ctypes.byref(blend), 2))
+            self.gdi32.SelectObject(memory, previous)
+            self.size = (width, height)
+            return ok
+        finally:
+            if bitmap:
+                self.gdi32.DeleteObject(bitmap)
+            self.gdi32.DeleteDC(memory)
+            self.user32.ReleaseDC(None, screen)
+
+
+def _keep_topmost(*windows) -> None:
+    """Raise these always-on-top windows above other always-on-top windows, in order, without taking focus."""
+    user32 = ctypes.windll.user32
+    user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, wintypes.UINT)
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    for window in windows:
+        try:
+            if window is None or not window.winfo_exists() or not window.winfo_ismapped():
+                continue
+            hwnd = user32.GetAncestor(wintypes.HWND(window.winfo_id()), 2) or window.winfo_id()
+        except tk.TclError:
+            continue
+        # HWND_TOPMOST; SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+        user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0200)
 
 
 def load_conversation(conversation_id: str) -> dict | None:
@@ -1135,9 +1343,27 @@ class QuickChat:
         self.pet_notice = ""
         self._notice_job = self._voice_limit_job = None
         self.options_panel = None
+        self.pet_body = None
+        if os.name == "nt" and os.environ.get("DOCKT_SMOOTH_PET", "1") != "0":
+            try:
+                self.pet_body = LayeredWindow(self.pet)
+                for sequence, handler in (("<ButtonPress-1>", self._pet_press), ("<B1-Motion>", self._pet_drag),
+                                          ("<ButtonRelease-1>", lambda _e: None), ("<Button-3>", self._pet_menu),
+                                          ("<Enter>", lambda _e: self._pet_hint(True)),
+                                          ("<Leave>", self._schedule_pet_hint_hide)):
+                    self.pet_body.top.bind(sequence, handler)
+                self.pet_body.top.configure(cursor="hand2")
+                # the body follows the pet window: dragged, shown and hidden with it
+                self.pet.bind("<Configure>", lambda _e: self._draw_pet(), add="+")
+                self.pet.bind("<Map>", lambda _e: (self.pet_body.top.deiconify(), self._draw_pet()), add="+")
+                self.pet.bind("<Unmap>", lambda _e: self.pet_body.top.withdraw(), add="+")
+            except (AttributeError, OSError, tk.TclError, ValueError) as exc:
+                print(f"smooth pet unavailable, drawing it on the canvas: {exc}")
+                self.pet_body = None
         self._place_pet()
         self._draw_pet()
         self.pet.after(520, self._animate_pet)
+        self.pet.after(2000, self._keep_pet_on_top)
 
     def _place_pet(self):
         self.pet.update_idletasks()
@@ -1147,6 +1373,18 @@ class QuickChat:
         x = max(0, screen_w - width - max(round(24*self.ui_scale), round(screen_w * 0.04)))
         y = max(0, screen_h - height - max(round(88*self.ui_scale), round(screen_h * 0.14)))
         self.pet.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _keep_pet_on_top(self):
+        """The pet stays in front of every window, even other always-on-top ones, without taking focus."""
+        try:
+            if not self.pet.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if os.name == "nt":
+            body = self.pet_body.top if self.pet_body else None
+            _keep_topmost(body, self.pet, self.options_panel)   # in order: the controls stay above the body
+        self.pet.after(2000, self._keep_pet_on_top)
 
     def _draw_pet(self):
         canvas = self.pet_canvas
@@ -1159,15 +1397,18 @@ class QuickChat:
         squash = 0.94 if bob == 0 else 1.0    # squash when it lands, full height at the top of the hop
         look = (-3 if bob else 3) if mood == "reading" else 0   # eyes glance side to side while reading
         frame = (mood, blink, squash, look)
-        photos = self.__dict__.setdefault("_pet_photos", {})
-        if frame not in photos:
-            key = None if self.pet_background != "#ff00ff" else (255, 0, 255)
-            photos[frame] = ImageTk.PhotoImage(
-                _pet_image(round(PET_SIZE * self.ui_scale), blink, key, squash, mood, look),
-                master=self.pet)
+        size = round(PET_SIZE * self.ui_scale)
         # Top-centred, leaving the bottom of the window for the hover controls and tooltip.
-        canvas.create_image((160 - PET_SIZE) / 2, 5 - bob, anchor="nw",
-                            image=photos[frame], tags=("pet-body",))
+        left, top = (160 - PET_SIZE) / 2, 5 - bob
+        if self.pet_body is not None and self._show_smooth_body(frame, size, left, top):
+            pass
+        else:
+            photos = self.__dict__.setdefault("_pet_photos", {})
+            if frame not in photos:
+                key = None if self.pet_background != "#ff00ff" else (255, 0, 255)
+                photos[frame] = ImageTk.PhotoImage(
+                    _pet_image(size, blink, key, squash, mood, look), master=self.pet)
+            canvas.create_image(left, top, anchor="nw", image=photos[frame], tags=("pet-body",))
         if self.pet_hint_visible:
             self._draw_pet_controls(canvas)
         canvas.scale("all", 0, 0, self.ui_scale, self.ui_scale)
@@ -1179,6 +1420,22 @@ class QuickChat:
                   x2 - radius, y2, x1 + radius, y2, x1, y2,
                   x1, y2 - radius, x1, y1 + radius, x1, y1]
         return canvas.create_polygon(*points, smooth=True, splinesteps=12, **kwargs)
+
+    def _show_smooth_body(self, frame, size, left, top) -> bool:
+        """Draw the robot in the per-pixel-alpha window over the pet window. False to fall back to the canvas."""
+        try:
+            if not self.pet.winfo_ismapped():
+                return True   # hidden pet: nothing to draw, and nothing to fall back to either
+            frames = self.__dict__.setdefault("_pet_smooth", {})
+            if frame not in frames:
+                mood, blink, squash, look = frame
+                frames[frame] = LayeredWindow.premultiplied_bgra(
+                    _pet_image(size, blink, None, squash, mood, look))
+            x = self.pet.winfo_rootx() + round(left * self.ui_scale)
+            y = self.pet.winfo_rooty() + round(top * self.ui_scale)
+            return self.pet_body.show(frames[frame], size, size, x, y)
+        except (OSError, tk.TclError, ValueError):
+            return False
 
     def _draw_pet_controls(self, canvas):
         self._rounded_rect(canvas, 43, 110, 117, 138, 12, fill="#252824",
@@ -1333,7 +1590,7 @@ class QuickChat:
             self._pet_say("Voice needs Windows", 3000)
             return
         try:
-            recorder = MicRecorder()
+            recorder = new_recorder()
             recorder.start()
         except (OSError, AttributeError) as exc:
             self.status.set(f"Couldn't open the microphone ({exc}). Check Windows' microphone privacy settings.")
@@ -1341,7 +1598,33 @@ class QuickChat:
             return
         self.recorder, self.voice_state = recorder, "recording"
         self._voice_limit_job = self.root.after(VOICE_LIMIT_MS, self._stop_voice)
+        if hasattr(recorder, "levels"):   # it can hear: stop by itself when the speaker is done
+            self._end_of_speech = EndOfSpeech()
+            self.root.after(VOICE_TICK_MS, self._watch_voice, recorder)
         self._pet_say("Listening…")
+
+    def _watch_voice(self, recorder):
+        if self.recorder is not recorder or self.voice_state != "recording":
+            return   # stopped by a click, the time limit or quitting
+        for level in recorder.levels():
+            verdict = self._end_of_speech.feed(level, VOICE_BLOCK_MS)
+            if verdict == "done":
+                self._stop_voice()
+                return
+            if verdict == "silent":
+                self._cancel_voice("Didn't hear anything")
+                return
+        self.root.after(VOICE_TICK_MS, self._watch_voice, recorder)
+
+    def _cancel_voice(self, notice: str = ""):
+        if self._voice_limit_job is not None:
+            self.root.after_cancel(self._voice_limit_job)
+            self._voice_limit_job = None
+        recorder, self.recorder = self.recorder, None
+        if recorder is not None:
+            recorder.cancel()
+        self.voice_state = "idle"
+        self._pet_say(notice, 3000 if notice else None)
 
     def _stop_voice(self):
         if self.voice_state != "recording" or self.recorder is None:

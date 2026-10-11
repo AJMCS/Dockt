@@ -8,11 +8,11 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :failed
 )
 
-if not exist ".venv\.dockt-deps-installed-v4" (
+if not exist ".venv\.dockt-deps-installed-v5" (
   echo Installing Dockt desktop requirements. This can take a few minutes the first time...
   ".venv\Scripts\python.exe" -m pip install -r requirements-server.txt -r requirements-agent.txt -r requirements-desktop.txt
   if errorlevel 1 goto :failed
-  type nul > ".venv\.dockt-deps-installed-v4"
+  type nul > ".venv\.dockt-deps-installed-v5"
 )
 
 echo Starting the Dockt desktop app, capture service and quick chat...
