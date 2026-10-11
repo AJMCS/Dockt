@@ -96,7 +96,13 @@ def test_chat_streams_tokens_then_cites(dash):
     ids = cited(dash)
     assert ids and chips(dash) == ids
     assert_cited_first(dash, ids)
-    assert "moments retrieved" in dash.page.locator("#thread .msg.bot .meta").inner_text()
+    strip = dash.page.locator("#thread .msg.bot .srcs .src")
+    assert strip.count() > 0, "every answer shows its sources under it"
+    assert strip.first.get_attribute("data-id") == ids[0], "cited sources come first"
+    assert " ms" not in dash.last_bot_text() and "moments retrieved" not in dash.page.inner_text("#thread"), "no timing in responses"
+    strip.first.click()
+    dash.page.wait_for_selector("#modal", state="visible")
+    assert dash.page.inner_text("#mMeta").startswith("#" + ids[0])
 
 
 def test_citation_chip_rules(dash, dockt):
@@ -207,6 +213,8 @@ def test_draft_from_answer(dash):
     assert "where is dinner tonight" in drafts[0]["instruction"]
     last = dash.js("messages.at(-1)")
     assert last["role"] == "assistant" and last["draft"] is True
+    draft_srcs = dash.page.locator("#thread .msg.bot.draft .srcs .src").evaluate_all("els => els.map(e => e.dataset.id)")
+    assert draft_srcs and set(draft_srcs) <= set(cited(dash)), "a draft shows the screenshots it was written from"
 
 
 def test_draft_failure_is_friendly(dash):
@@ -352,6 +360,9 @@ def test_standup_and_timesheet(dash, kind, label):
     assert dash.page.locator("#thread .msg.bot.draft .text b").count() > 0, "**bold** should render"
     assert [m["role"] for m in dash.js("messages")] == ["user", "assistant"]
     assert dash.page.is_enabled("#go")
+    dash.page.wait_for_selector("#thread .msg.bot.draft .srcs")
+    assert dash.page.locator("#thread .msg.bot.draft .srcs .src").count() > 0, "a standup shows the screens it read"
+    assert " ms" not in dash.page.inner_text("#thread .msg.bot.draft")
 
 
 def test_standup_failure_is_friendly(dash):
@@ -503,7 +514,7 @@ CONTRAST_JS = """(sels) => {
   }
   return out; }"""
 TEXT = {
-    "sources": ["#thread .msg.bot .text", "#thread .msg.bot .meta", "#thread .msg.user .text", "#thread .cite", "#localBadge",
+    "sources": ["#thread .msg.bot .text", "#thread .msg.bot .src", "#thread .msg.user .text", "#thread .cite", "#localBadge",
                 "#sources .card .sum", "#sources .card .meta", "#chatList .ctitle", "#dev", ".tab"],
     "promises": [".kind.deadline", ".ptext", "#promises li > .meta", "#promCount", "#promHint"],
     "timeline": [".tlaxis span"],
