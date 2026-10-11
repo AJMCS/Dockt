@@ -14,6 +14,7 @@
     --text: #1F1E1D; --muted: #6B6A65; --hover: rgba(31, 30, 29, .05); --active: rgba(31, 30, 29, .08); --img-bg: #EDEBE3;
     --accent: #76B900; --accent-hover: #6AA600; --on-accent: #1F1E1D;   /* fills only */
     --accent-text: #4D7C0F; --accent-soft: rgba(118, 185, 0, .14);     /* text/links on cream */
+    --cite-text: #3F6212;   /* chip text sits on --accent-soft, so it needs a darker green to stay above 4.5:1 */
     --warn-text: #B45309; --info-text: #1D4ED8; --bad-text: #B91C1C;
     --shadow: 0 1px 2px rgba(31, 30, 29, .04), 0 6px 20px rgba(31, 30, 29, .07); --backdrop: rgba(31, 30, 29, .42);
     --sun: none; --moon: inline; color-scheme: light;
@@ -25,7 +26,7 @@
     :root:not([data-theme="light"]) {
       --bg: #262624; --surface: #30302E; --surface2: #1F1E1D; --recess: #1F1E1D; --line: #3E3E3A;
       --text: #F5F4EE; --muted: #A3A29B; --hover: rgba(245, 244, 238, .06); --active: rgba(245, 244, 238, .09); --img-bg: #1F1E1D;
-      --accent-text: #A3E635; --accent-soft: rgba(163, 230, 53, .13);
+      --accent-text: #A3E635; --accent-soft: rgba(163, 230, 53, .13); --cite-text: #A3E635;
       --warn-text: #F2B35B; --info-text: #8AB8F5; --bad-text: #F28B82;
       --shadow: 0 1px 2px rgba(0, 0, 0, .25), 0 8px 24px rgba(0, 0, 0, .25); --backdrop: rgba(20, 20, 19, .62);
       --sun: inline; --moon: none; color-scheme: dark;
@@ -34,7 +35,7 @@
   :root[data-theme="dark"] {
       --bg: #262624; --surface: #30302E; --surface2: #1F1E1D; --recess: #1F1E1D; --line: #3E3E3A;
       --text: #F5F4EE; --muted: #A3A29B; --hover: rgba(245, 244, 238, .06); --active: rgba(245, 244, 238, .09); --img-bg: #1F1E1D;
-      --accent-text: #A3E635; --accent-soft: rgba(163, 230, 53, .13);
+      --accent-text: #A3E635; --accent-soft: rgba(163, 230, 53, .13); --cite-text: #A3E635;
       --warn-text: #F2B35B; --info-text: #8AB8F5; --bad-text: #F28B82;
       --shadow: 0 1px 2px rgba(0, 0, 0, .25), 0 8px 24px rgba(0, 0, 0, .25); --backdrop: rgba(20, 20, 19, .62);
       --sun: inline; --moon: none; color-scheme: dark;
@@ -82,7 +83,7 @@
   .msg.bot.draft .text { background: var(--surface2); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; font-size: 16px; }
   .msg.bot .actions, .msg.bot .meta, .msg.bot .hint { font-family: var(--sans); }
   .hint { color: var(--muted); font-size: 14px; }
-  .cite { display: inline-block; background: var(--accent-soft); color: var(--accent-text); border-radius: 6px; padding: 0 6px;
+  .cite { display: inline-block; background: var(--accent-soft); color: var(--cite-text); border-radius: 6px; padding: 0 6px;
           font: 600 13px/1.6 var(--sans); vertical-align: 1px; cursor: pointer; transition: background .15s, color .15s; }
   .cite:hover { background: var(--accent); color: var(--on-accent); }
 
