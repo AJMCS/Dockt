@@ -149,12 +149,37 @@ def _on_screen(reason: str, screen: str) -> bool:
     return False
 
 
+def _asked_by_me(request: str, screen: str) -> bool:
+    """Is this request one the user made? The vision model writes the user's own messages as "Me: ...", and
+    Nemotron often files "Me: can you review the redline?" as owner me even with that exact prompt example.
+    Find the screen line that best matches the request; True when its speaker is Me."""
+    words = set(re.findall(r"[a-z0-9']+", request.lower())) - _STOP
+    best, speaker = 0.0, ""
+    for line in screen.splitlines():
+        m = re.match(r"^\s*([\w .'-]{1,30}):\s*(.+)$", line)
+        if not m or not words:
+            continue
+        overlap = len(words & set(re.findall(r"[a-z0-9']+", m.group(2).lower()))) / len(words)
+        if overlap > best:
+            best, speaker = overlap, m.group(1).strip().lower()
+    return best >= 0.6 and speaker == "me"
+
+
+_STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "by", "on", "in", "at", "my", "your", "you", "me",
+         "can", "could", "please", "will", "i'll", "it", "this", "that"}
+
+
 def _parse_extract(text: str, open_ids: set[int], screen: str | None = None) -> tuple[list[dict], list[dict]]:
     """(new items, updates) from the model's JSON. Raises ValueError when there's no usable JSON, so the capture
     is retried rather than silently marked done. A bare JSON array (the old format) counts as new items."""
     text = models._strip_think(text or "")
     for i, j in ((text.find("{"), text.rfind("}")), (text.find("["), text.rfind("]"))):
         if 0 <= i < j:
+            try:   # a complete object followed by junk (a stray "}" or prose) parses on its own
+                data = json.JSONDecoder().raw_decode(text[i:])[0]
+                break
+            except json.JSONDecodeError:
+                pass
             # models sometimes stop before the last brackets: try closing them
             for tail in ("", "]}", "}", "]", "}]}"):
                 try:
@@ -174,9 +199,12 @@ def _parse_extract(text: str, open_ids: set[int], screen: str | None = None) -> 
     new = []
     for it in data.get("new") or []:
         if isinstance(it, dict) and isinstance(it.get("text"), str) and it["text"].strip():
+            kind = it.get("kind") if it.get("kind") in ("promise", "request", "deadline") else "promise"
             owner = str(it.get("owner") or it.get("who") or "me").strip().lower()
-            new.append({"kind": it.get("kind") if it.get("kind") in ("promise", "request", "deadline") else "promise",
-                        "text": it["text"], "who": "me" if owner == "me" else "them", "due": str(it.get("due") or "")})
+            if kind == "request" and owner == "me" and screen and _asked_by_me(it["text"], screen):
+                owner = "them"   # the user asked someone else, so it's theirs to do
+            new.append({"kind": kind, "text": it["text"], "who": "me" if owner == "me" else "them",
+                        "due": str(it.get("due") or "")})
     updates = []
     for u in data.get("updates") or []:
         try:
