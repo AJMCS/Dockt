@@ -8,6 +8,11 @@ Dockt desktop app (Lane 2): the dashboard in its own native window, no browser.
 
 On Windows run it with pythonw.exe (Dockt.bat does) so no console shows.
 
+gx10.txt holds either the GX10's address (192.168.8.10: Ollama reached directly on :11434) or
+user@address (asus@169.233.72.21: reached through an SSH tunnel this process keeps open on
+127.0.0.1:11435, for networks where 11434 isn't reachable, e.g. campus Wi-Fi). The tunnel needs
+an SSH key the GX10 accepts; desktop/Setup-GX10.bat sets that up once per laptop.
+
 If the local service isn't answering on 127.0.0.1:8000, this starts server/app.py (plus
 tools/mock_models.py with --mock) and agent/capture.py, then opens a native window on the
 dashboard: WebView2 on Windows (built into Windows 10/11), WebKit on macOS. Closing the
@@ -39,10 +44,12 @@ LOGS = HOME / "logs"
 PORT = int(os.environ.get("DOCKT_PORT", "8000"))   # resolve_port() may change it
 BASE = f"http://127.0.0.1:{PORT}"
 CONTROL_PORT = int(os.environ.get("DOCKT_DESKTOP_PORT", "8765"))
+TUNNEL_PORT = int(os.environ.get("DOCKT_TUNNEL_PORT", "11435"))   # local end of the SSH tunnel to Ollama
 ICON = Path(__file__).with_name("dockt.ico")
 
 children: list[subprocess.Popen] = []
 shutdown_requested = threading.Event()
+stopping = threading.Event()   # set by stop_children so the tunnel watchdog doesn't reconnect
 
 
 # ---------- helpers ----------
@@ -80,6 +87,16 @@ def port_free(port: int) -> bool:
             return False
 
 
+def listening(port: int) -> bool:
+    """Something accepts connections on 127.0.0.1:<port>. Unlike port_free, sockets left in
+    TIME_WAIT by a tunnel that just closed don't count."""
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+        return True
+    except OSError:
+        return False
+
+
 def resolve_port():
     """Same rule as Lane 1's start-dockt.bat (agent/find_port.py): DOCKT_PORT if set, else a Dockt
     already answering in 8000-8099, else the first free port there. Children inherit DOCKT_PORT/DOCKT_URL."""
@@ -92,19 +109,21 @@ def resolve_port():
     os.environ["DOCKT_PORT"], os.environ["DOCKT_URL"] = str(PORT), BASE
 
 
-def spawn(name: str, args: list[str], env: dict) -> subprocess.Popen:
+def spawn(name: str, args: list[str], env: dict, program: str | None = None) -> subprocess.Popen:
+    """Start a child that logs to ~/.dockt/logs/<name>.log. Python scripts by default, `program` otherwise."""
     LOGS.mkdir(parents=True, exist_ok=True)
     log = open(LOGS / f"{name}.log", "a", encoding="utf-8")
     log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(args)}\n")
     log.flush()
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    p = subprocess.Popen([sys.executable, *args], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
-                         creationflags=flags)
+    p = subprocess.Popen([program or sys.executable, *args], cwd=ROOT, env=env, stdout=log,
+                         stderr=subprocess.STDOUT, creationflags=flags)
     children.append(p)
     return p
 
 
 def stop_children():
+    stopping.set()
     for p in reversed(children):
         if p.poll() is None:
             p.terminate()
@@ -116,18 +135,63 @@ def stop_children():
     children.clear()
 
 
+def gx10_address(env: dict) -> str:
+    """DOCKT_GX10, else the first word of gx10.txt: '192.168.8.10' or 'asus@169.233.72.21'."""
+    gx10 = env.get("DOCKT_GX10", "")
+    if not gx10 and (ROOT / "gx10.txt").exists():
+        gx10 = next(iter((ROOT / "gx10.txt").read_text(encoding="utf-8-sig").split()), "")
+    return gx10
+
+
+def tunnel_target(mock: bool, env: dict) -> str:
+    """user@host when the models should go through an SSH tunnel, else ''."""
+    gx10 = gx10_address(env)
+    return gx10 if not mock and "@" in gx10 and "VLM_URL" not in env else ""
+
+
 def model_env(mock: bool) -> dict:
     env = dict(os.environ)
     if mock:
         env["VLM_URL"] = "http://127.0.0.1:9000/v1"
         return env
-    gx10 = env.get("DOCKT_GX10", "")
-    if not gx10 and (ROOT / "gx10.txt").exists():
-        gx10 = next(iter((ROOT / "gx10.txt").read_text().split()), "")
+    gx10 = gx10_address(env)
     if gx10 and "VLM_URL" not in env:   # same defaults as Lane 1's start-dockt.bat (team/lane1.md P0-b)
-        env.update(VLM_URL=f"http://{gx10}:11434/v1", VLM_MODEL="gemma4:26b",
+        host = f"127.0.0.1:{TUNNEL_PORT}" if "@" in gx10 else f"{gx10}:11434"
+        env.update(VLM_URL=f"http://{host}/v1", VLM_MODEL="gemma4:26b",
                    LLM_MODEL="nemotron3:33b", EMBED_MODEL="nomic-embed-text")
     return env
+
+
+def ssh_tunnel_args(target: str, local_port: int = TUNNEL_PORT) -> list[str]:
+    """Forward 127.0.0.1:<local_port> to Ollama on the GX10. BatchMode: fail instead of prompting
+    for a password nobody can see; keepalives so a dropped Wi-Fi link exits and gets reconnected."""
+    return ["-N", "-L", f"127.0.0.1:{local_port}:127.0.0.1:11434",
+            "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+            "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", target]
+
+
+def start_tunnel(target: str):
+    """Keep an SSH tunnel to the GX10 open until Dockt stops, reconnecting when it drops.
+    The tray's "GX10 unreachable" state (from /api/health) shows when it is down."""
+    if listening(TUNNEL_PORT):   # a tunnel from an earlier run (or a manual one) is already there
+        print(f"127.0.0.1:{TUNNEL_PORT} is already in use; assuming it's a tunnel to the GX10")
+        return
+
+    def keep_open():
+        while not stopping.is_set():
+            try:
+                p = spawn("tunnel", ssh_tunnel_args(target), dict(os.environ), program="ssh")
+            except FileNotFoundError:   # no OpenSSH client (Windows: Settings > Optional features)
+                print("ssh not found; can't open the tunnel to the GX10")
+                return
+            p.wait()
+            stopping.wait(5)
+
+    threading.Thread(target=keep_open, daemon=True).start()
+    deadline = time.time() + 8   # let the first connection come up before the indexer needs the models
+    while not listening(TUNNEL_PORT) and time.time() < deadline and not stopping.is_set():
+        time.sleep(0.3)
 
 
 def start_backend(mock: bool, capture: bool) -> subprocess.Popen | None:
@@ -135,6 +199,9 @@ def start_backend(mock: bool, capture: bool) -> subprocess.Popen | None:
     if answers(BASE + "/api/stats"):
         return None
     env = model_env(mock)
+    target = tunnel_target(mock, os.environ)
+    if target:
+        start_tunnel(target)
     if mock and not answers("http://127.0.0.1:9000/v1/models"):
         spawn("mock_models", ["-m", "uvicorn", "--app-dir", "tools", "mock_models:app", "--port", "9000"], env)
     server = spawn("server", ["server/app.py"], env)

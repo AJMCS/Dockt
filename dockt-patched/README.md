@@ -6,6 +6,8 @@
 
 Run `start-dockt.bat` from the `dockt-patched` folder. It starts local capture and the quick-chat pet; the dashboard opens hidden so startup leaves the pet as the only Dockt window on screen. Right-click the pet for the styled controls panel; choose **Open Dashboard** to show the centered 1040×700 dashboard. Closing that window hides it and leaves the pet running. Choose **Quit Dockt** in the controls panel to close the full session. The launcher uses the GX10 address from `gx10.txt` (or `DOCKT_GX10`). Add `--mock` to run against the local mock model without the GX10. Click the pet to open quick chat; `Ctrl+Space` toggles the chat window and `Esc` hides it. The controls panel also lets you pause or resume screen capture; paused state is shared with `agent/capture.py` through `~/.dockt_pause`.
 
+**GX10 over SSH (campus Wi-Fi):** if the laptop can't reach the GX10's port 11434 directly, double-click `desktop\Setup-GX10.bat` once. It asks for the GX10 login (e.g. `asus@169.233.72.21`), creates an SSH key for this laptop, adds it to the GX10 (asks for the GX10 password once), and writes the login to `gx10.txt`. From then on the launcher sees `user@address` in `gx10.txt` and keeps an SSH tunnel to the GX10's Ollama open on `127.0.0.1:11435` while Dockt runs, reconnecting if the Wi-Fi drops (log: `~/.dockt/logs/tunnel.log`). A plain address in `gx10.txt` (e.g. on our own router) still connects directly.
+
 Run the regression and local API smoke tests from this folder with:
 
 ```powershell
