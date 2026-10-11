@@ -487,6 +487,17 @@ def test_theme_follows_system(dash, request):
     assert dash.js("getComputedStyle(document.body).backgroundColor") == BG[request.node.callspec.params["context"]]
 
 
+@pytest.mark.parametrize("context", ["dark"], indirect=True)
+def test_opening_the_dashboard_saves_no_theme(dash, dockt):
+    dash.open()
+    dash.page.wait_for_timeout(300)   # let the theme sync finish
+    assert dockt.get("/api/theme")["theme"] is None, "only the toggle may save a theme; otherwise follow the system"
+    assert dash.js("document.documentElement.dataset.theme") is None
+    dash.page.click("#themeToggle")
+    dash.page.wait_for_function("fetch('/api/theme').then(r => r.json()).then(j => j.theme === 'light')")
+    assert (dockt.data / "theme").read_text() == "light", "the choice is saved in this service's DATA_DIR"
+
+
 def test_theme_toggle_persists(dash):
     dash.open()
     dash.page.click("#themeToggle")

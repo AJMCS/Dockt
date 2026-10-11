@@ -35,7 +35,8 @@ MOD_NOREPEAT = 0x4000
 VK_SPACE = 0x20
 CITATION = re.compile(r"\[#(\d+)\]")
 CAPTURE_PAUSE_FILE = Path.home() / ".dockt_pause"
-THEME_FILE = Path.home() / ".dockt_theme"
+# the theme the dashboard saves: <DATA_DIR>/theme, same default as server/memory.py; absent = follow the system
+THEME_FILE = Path(os.environ.get("DATA_DIR", str(Path.home() / ".dockt" / "data"))).resolve() / "theme"
 PALETTES = {
     "light": {
         "bg": "#FAF9F5", "surface": "#FFFFFF", "surface2": "#F5F4EE",
