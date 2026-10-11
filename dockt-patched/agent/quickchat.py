@@ -436,12 +436,13 @@ class QuickChat:
         self.pet_canvas.bind("<ButtonRelease-1>", self._pet_release)
         self.pet_canvas.bind("<Button-3>", self._pet_menu)
         self.pet_canvas.bind("<Enter>", lambda _event: self._pet_hint(True))
-        self.pet_canvas.bind("<Leave>", lambda _event: self._pet_hint(False))
+        self.pet_canvas.bind("<Leave>", self._schedule_pet_hint_hide)
         self.pet_xy = (0, 0)
         self.pet_dragged = False
         self.pet_bob = 0
         self.pet_hint_visible = False
         self.hint_panel = None
+        self._hint_hide_job = None
         self.options_panel = None
         self._place_pet()
         self._draw_pet()
@@ -495,20 +496,37 @@ class QuickChat:
         self.pet.after(520, self._animate_pet)
 
     def _pet_hint(self, visible: bool):
-        self.pet_hint_visible = visible
+        if self._hint_hide_job is not None:
+            try:
+                self.root.after_cancel(self._hint_hide_job)
+            except tk.TclError:
+                pass
+            self._hint_hide_job = None
         if self.hint_panel is not None:
-            self.hint_panel.destroy()
-            self.hint_panel = None
+            if not visible:
+                self.hint_panel.destroy()
+                self.hint_panel = None
         if not visible:
+            self.pet_hint_visible = False
             return
+        if self.hint_panel is not None:
+            self.pet_hint_visible = True
+            return
+        self.pet_hint_visible = True
         panel = tk.Toplevel(self.root)
         self.hint_panel = panel
         panel.overrideredirect(True)
         panel.attributes("-topmost", True)
         panel.configure(bg="#363A3D", padx=12, pady=9)
-        for row, text in enumerate(("Click to chat", "Right-click for options")):
-            icon = tk.Canvas(panel, width=round(24*self.ui_scale), height=round(22*self.ui_scale), bg="#363A3D", highlightthickness=0)
-            icon.grid(row=row, column=0, padx=(0, 8), pady=3)
+        panel.bind("<Enter>", lambda _event: self._pet_hint(True))
+        panel.bind("<Leave>", self._schedule_pet_hint_hide)
+        for row, text in enumerate(("Click to chat", "Click for options")):
+            row_frame = tk.Frame(panel, bg="#363A3D", cursor="hand2")
+            row_frame.grid(row=row, column=0, sticky="ew")
+            icon = tk.Canvas(row_frame, width=round(24*self.ui_scale),
+                             height=round(22*self.ui_scale), bg="#363A3D",
+                             highlightthickness=0, cursor="hand2")
+            icon.pack(side="left", padx=(0, 8), pady=3)
             if row == 0:
                 icon.create_rectangle(3, 3, 20, 15, outline="#E4E7E9", width=2)
                 icon.create_line(8, 15, 8, 19, 13, 15, fill="#E4E7E9", width=2)
@@ -520,13 +538,29 @@ class QuickChat:
             for item in icon.find_all():
                 if icon.itemcget(item, "width"):
                     icon.itemconfigure(item, width=2*self.ui_scale)
-            tk.Label(panel, text=text, bg="#363A3D", fg="#E4E7E9",
-                     font=("Segoe UI", 10)).grid(row=row, column=1, sticky="w", pady=3)
+            label = tk.Label(row_frame, text=text, bg="#363A3D", fg="#E4E7E9",
+                             font=("Segoe UI", 10), cursor="hand2")
+            label.pack(side="left", pady=3)
+            for widget in (row_frame, icon, label):
+                widget.bind("<Enter>", lambda _event: self._pet_hint(True))
+                widget.bind("<Leave>", self._schedule_pet_hint_hide)
+                if row == 0:
+                    widget.bind("<Button-1>", lambda _event: self.show())
+                else:
+                    widget.bind("<Button-1>", lambda event: self._show_options_at(event.x_root, event.y_root))
         panel.update_idletasks()
         width, height = panel.winfo_reqwidth(), panel.winfo_reqheight()
         x = max(8, min(self.pet.winfo_x(), self.pet.winfo_screenwidth()-width-8))
         y = max(8, self.pet.winfo_y()-height-8)
         panel.geometry(f"+{x}+{y}")
+
+    def _schedule_pet_hint_hide(self, _event=None):
+        if self._hint_hide_job is not None:
+            try:
+                self.root.after_cancel(self._hint_hide_job)
+            except tk.TclError:
+                pass
+        self._hint_hide_job = self.root.after(320, lambda: self._pet_hint(False))
 
     def _pet_press(self, event):
         self.pet_xy = (event.x_root - self.pet.winfo_x(),
@@ -545,6 +579,10 @@ class QuickChat:
             self.show()
 
     def _pet_menu(self, event):
+        self._pet_hint(False)
+        self._show_options_at(event.x_root, event.y_root)
+
+    def _show_options_at(self, x_root, y_root):
         self._pet_hint(False)
         self._close_options_panel()
         panel = tk.Toplevel(self.pet)
@@ -572,8 +610,8 @@ class QuickChat:
         panel.update_idletasks()
         width, height = panel.winfo_reqwidth(), panel.winfo_reqheight()
         screen_w, screen_h = panel.winfo_screenwidth(), panel.winfo_screenheight()
-        x = min(event.x_root, screen_w - width - 8)
-        y = event.y_root if event.y_root + height <= screen_h else event.y_root - height
+        x = min(x_root, screen_w - width - 8)
+        y = y_root if y_root + height <= screen_h else y_root - height
         panel.geometry(f"+{max(8, x)}+{max(8, y)}")
         panel.bind("<Escape>", lambda _event: self._close_options_panel())
         panel.bind("<FocusOut>", self._options_focus_out, add="+")
@@ -629,13 +667,18 @@ class QuickChat:
         self.status.set("Screen capture paused" if paused else "Screen capture resumed")
 
     def toggle(self):
-        if self.chat.state() == "withdrawn":
-            self.show()
+        """Toggle pet visibility for the global keyboard shortcut."""
+        if self.pet.state() == "withdrawn":
+            self.pet.deiconify()
+            self.pet.lift()
+            self.pet.attributes("-topmost", True)
         else:
-            self.hide()
+            self.hide_pet()
 
     def hide_pet(self):
         self.hide()
+        self._pet_hint(False)
+        self._close_options_panel()
         self.pet.withdraw()
 
     def show(self):

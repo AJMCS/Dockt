@@ -155,6 +155,23 @@ class QuickChatTests(unittest.TestCase):
                 self.assertFalse(quickchat.toggle_capture())
                 self.assertFalse(pause_file.exists())
 
+    def test_global_toggle_hides_and_restores_the_pet_only(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app.pet = Mock()
+        app.pet.state.return_value = "normal"
+        app.hide_pet = Mock()
+        app.toggle()
+        app.hide_pet.assert_called_once_with()
+        app.pet.deiconify.assert_not_called()
+
+        app.pet.reset_mock()
+        app.pet.state.return_value = "withdrawn"
+        app.toggle()
+        app.pet.deiconify.assert_called_once_with()
+        app.pet.lift.assert_called_once_with()
+        app.pet.attributes.assert_called_once_with("-topmost", True)
+        app.hide_pet.assert_called_once_with()
+
     def test_options_panel_dismissal_does_not_run_quit_action(self):
         app = quickchat.QuickChat.__new__(quickchat.QuickChat)
         panel = Mock()

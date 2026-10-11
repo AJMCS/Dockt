@@ -116,3 +116,28 @@ class QuickChatWidgetTests(unittest.TestCase):
         self.assertGreaterEqual(bounds[1], 0)
         self.assertLessEqual(bounds[2], 160*app.ui_scale)
         self.assertLessEqual(bounds[3], 140*app.ui_scale)
+
+    def test_pet_hint_stays_open_across_pointer_handoff_and_actions_are_clickable(self):
+        root, app = self.make_app(96/72)
+        app._pet_hint(True)
+        root.update()
+        hint = app.hint_panel
+        rows = hint.winfo_children()
+        self.assertEqual(len(rows), 2)
+
+        app._schedule_pet_hint_hide()
+        pending_hide = app._hint_hide_job
+        app._pet_hint(True)  # entering the tooltip cancels the pet's delayed leave
+        self.assertIsNone(app._hint_hide_job)
+        self.assertEqual(app.hint_panel, hint)
+        self.assertIsNotNone(pending_hide)
+
+        with patch.object(app, "show") as show:
+            rows[0].event_generate("<Button-1>")
+            root.update()
+            show.assert_called_once_with()
+
+        with patch.object(app, "_show_options_at") as show_options:
+            rows[1].event_generate("<Button-1>", x=8, y=8)
+            root.update()
+            show_options.assert_called_once()
