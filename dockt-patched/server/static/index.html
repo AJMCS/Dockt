@@ -7,6 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%2376b900'/%3E%3C/svg%3E">
 <script>  /* apply a saved theme before first paint */
   try { const t = localStorage.getItem("dockt-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+  try { if (localStorage.getItem("dockt-sidebar") === "collapsed") document.documentElement.classList.add("sb-collapsed"); } catch {}
 </script>
 <style>
   :root {
@@ -51,7 +52,22 @@
   /* sidebar (Claude-style): logo, new chat, recents, theme */
   #sidebar { width: 264px; flex: none; position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 6px;
              padding: 14px 10px 10px; background: var(--surface2); border-right: 1px solid var(--line); z-index: 20; }
-  .sb-head { display: flex; align-items: center; gap: 10px; padding: 2px 8px 10px; }
+  .sb-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 2px 0 10px 8px; }
+  .sb-head .local { order: 3; }   /* logo + toggle on the first row, the badge under them */
+  #sbToggle { margin-left: auto; color: var(--muted); }
+  #sbToggle:hover { color: var(--text); }
+  #sidebar { transition: width .2s ease, padding .2s ease; overflow: hidden; }
+  /* collapsed: a slim rail of icon buttons, like Claude (desktop only; phones use the drawer) */
+  @media (min-width: 901px) {
+    .sb-collapsed #sidebar { width: 60px; padding: 14px 8px 10px; }
+    .sb-collapsed .sb-head { flex-direction: column; gap: 12px; padding: 2px 0 8px; }
+    .sb-collapsed .sb-head .logo, .sb-collapsed #history, .sb-collapsed .sb-new .label { display: none; }
+    .sb-collapsed #sbToggle { margin: 0; order: -1; }
+    .sb-collapsed .sb-head .local { width: 10px; height: 10px; padding: 0; font-size: 0; border-radius: 50%; background: var(--accent); }
+    .sb-collapsed .sb-head .local.down { background: var(--bad-text); }
+    .sb-collapsed .sb-new { justify-content: center; padding: 7px 0; }
+    .sb-collapsed .sb-foot { justify-content: center; padding: 8px 0 0; margin-top: auto; }
+  }
   .logo { font-weight: 650; font-size: 20px; letter-spacing: -.02em; }
   .logo span { color: var(--accent); }
   .local { font-size: 12px; font-weight: 500; color: var(--accent-text); border: 1px solid var(--accent); padding: 2px 10px; border-radius: 99px; white-space: nowrap; }
@@ -248,8 +264,11 @@
 </head>
 <body>
 <aside id="sidebar">
-  <div class="sb-head"><div class="logo">Dockt<span>.</span></div><div class="local" id="localBadge">● Powered by local AI</div></div>
-  <button class="sb-new" id="newChat" title="Start a new conversation"><span class="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span>New chat</button>
+  <div class="sb-head">
+    <div class="logo">Dockt<span>.</span></div><div class="local" id="localBadge">● Powered by local AI</div>
+    <button class="btn icon" id="sbToggle" title="Close sidebar" aria-label="Collapse sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/></svg></button>
+  </div>
+  <button class="sb-new" id="newChat" title="Start a new conversation"><span class="plus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></span><span class="label">New chat</span></button>
   <div id="history">
     <h3>Recents</h3>
     <ul id="chatList"></ul>
@@ -539,6 +558,16 @@ function newChat() {
 }
 $("#newChat").onclick = newChat;
 const closeSidebar = () => document.body.classList.remove("sb-open");
+// collapse to a rail (desktop) / close the drawer (phones); remembered in localStorage
+function setSidebarCollapsed(collapsed) {
+  document.documentElement.classList.toggle("sb-collapsed", collapsed);
+  try { localStorage.setItem("dockt-sidebar", collapsed ? "collapsed" : "open"); } catch {}
+  $("#sbToggle").title = collapsed ? "Open sidebar" : "Close sidebar";
+  $("#sbToggle").setAttribute("aria-expanded", String(!collapsed));
+}
+$("#sbToggle").onclick = () => matchMedia("(max-width: 900px)").matches
+  ? closeSidebar() : setSidebarCollapsed(!document.documentElement.classList.contains("sb-collapsed"));
+setSidebarCollapsed(document.documentElement.classList.contains("sb-collapsed"));
 
 // ---------- side panel: Sources by default; Promises / Timeline open from the top-right buttons ----------
 const narrow = () => matchMedia("(max-width: 1100px)").matches;   // panel overlays the chat below this width

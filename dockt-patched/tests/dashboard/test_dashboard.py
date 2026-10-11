@@ -551,3 +551,39 @@ def test_phone_sidebar_drawer(dash):
     dash.page.click("#menuBtn")
     dash.page.locator("#chatList li[data-id]").first.click()
     assert not dash.js("document.body.classList.contains('sb-open')")
+
+
+# ---------------------------------------------------------------- collapsible sidebar
+def test_sidebar_collapses_to_rail_and_remembers(dash):
+    dash.open().ask("where is dinner tonight")
+    width = lambda: dash.page.locator("#sidebar").bounding_box()["width"]
+    assert width() > 200 and dash.page.locator("#chatList").is_visible()
+    dash.page.click("#sbToggle")
+    dash.page.wait_for_timeout(300)
+    assert width() < 80, "collapsed sidebar should be a slim rail"
+    assert dash.page.locator("#chatList").is_hidden() and dash.page.locator(".sb-new .label").is_hidden()
+    assert dash.page.get_attribute("#sbToggle", "aria-expanded") == "false"
+    dash.page.reload()
+    dash.page.wait_for_timeout(300)
+    assert width() < 80, "collapsed state should survive a reload"
+    dash.page.click("#newChat")                                  # icon-only New chat still works
+    assert dash.js("messages.length") == 0
+    dash.page.route("**/api/health", lambda r: r.fulfill(
+        status=200, content_type="application/json", body='{"models":{"vlm":false,"embed":true,"llm":true}}'))
+    dash.js("refreshHealth()")
+    dash.page.wait_for_function("document.querySelector('#localBadge').classList.contains('down')")
+    assert "rgb(" in dash.js("getComputedStyle(localBadge).backgroundColor"), "status dot shows health when collapsed"
+    dash.page.click("#sbToggle")
+    dash.page.wait_for_timeout(300)
+    assert width() > 200 and dash.page.locator("#chatList").is_visible()
+
+
+@pytest.mark.viewport(400, 820)
+def test_phone_sidebar_toggle_closes_drawer(dash):
+    dash.open()
+    dash.page.click("#menuBtn")
+    dash.page.wait_for_timeout(300)
+    dash.page.click("#sbToggle")
+    dash.page.wait_for_timeout(300)
+    assert dash.page.locator("#sidebar").bounding_box()["x"] < 0
+    assert not dash.js("document.documentElement.classList.contains('sb-collapsed')"), "phones never collapse to a rail"
