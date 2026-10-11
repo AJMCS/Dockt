@@ -28,7 +28,9 @@ Hover over the desktop pet to see three buttons: quick chat, a single microphone
 voice, and more options (three dots). Click the mic, speak your question,
 then pause for about 1.2 seconds to stop and ask automatically, or click again
 to stop manually. Eight seconds without speech cancels the recording. Dockt continues the current quick-chat
-conversation and reads the answer using Windows' built-in local voice. Click
+conversation and reads the answer with Kokoro's local neural voice. Kokoro
+models download on first playback; set `DOCKT_KOKORO_VOICE` to choose another
+voice such as `af_heart` or `am_michael`. Click
 again while it is thinking or speaking to cancel, or press Esc in quick chat.
 The answer remains available as text with its source links. Any unsent typed
 draft is preserved.

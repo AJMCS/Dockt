@@ -6,5 +6,5 @@ customtkinter>=5.2,<7
 # (metadata_errors) that PyAV 19 removed, so hold PyAV below 19.
 faster-whisper>=1.1
 av<19
-# The pet's mic: hears when you've finished speaking (agent/quickchat.py StreamRecorder).
-sounddevice>=0.4
+# Neural local text-to-speech for the desktop pet (model weights download on first reply).
+kokoro-onnx>=0.6.1

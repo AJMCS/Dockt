@@ -340,8 +340,7 @@ def _pet_control_image(kind, active=False, state="idle", scale=1.0):
 
 
 class LocalSpeech:
-    """Windows SAPI in a hidden child process; text is input data, never shell code."""
-    COMMAND = "$ErrorActionPreference='Stop'; [Console]::InputEncoding=[Text.Encoding]::UTF8; $text=[Console]::In.ReadToEnd(); $voice=New-Object -ComObject SAPI.SpVoice; $null=$voice.Speak($text)"
+    """Local Kokoro neural speech in a cancellable child process."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -371,14 +370,15 @@ class LocalSpeech:
                     if generation != self.generation:
                         return
                     process = self.process = subprocess.Popen(
-                        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", self.COMMAND],
-                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        text=True, encoding="utf-8", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                process.communicate(text, timeout=120)
+                        [sys.executable, "-m", "agent.kokoro_speech"],
+                        cwd=str(Path(__file__).resolve().parents[1]), stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                process.communicate(text.encode("utf-8"), timeout=600)
                 if process.returncode:
-                    error = "Couldn't play the spoken reply."
+                    error = "Couldn't play the Kokoro voice. Check the local model and voice settings."
             except Exception:
-                error = "Couldn't play the spoken reply."
+                error = "Couldn't play the Kokoro voice. Check the local model and voice settings."
                 if process is not None and process.poll() is None:
                     process.terminate()
             finally:
