@@ -35,6 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import brain
+import conversations
 import indexer
 import memory
 import models
@@ -56,6 +57,7 @@ async def lifespan(_app):
 
 app = FastAPI(title="Dockt", lifespan=lifespan)
 app.include_router(brain.router)
+app.include_router(conversations.router)
 
 
 # ---------- ingest ----------

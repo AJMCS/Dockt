@@ -209,6 +209,7 @@ class ChatReq(BaseModel):
     messages: list[ChatMsg]
     stream: bool = False
     device: str | None = None
+    conversation_id: str | None = None
 
 
 CHAT_MAX_ROUNDS = int(os.environ.get("CHAT_MAX_ROUNDS", "4"))
@@ -467,19 +468,39 @@ def _sse(obj: dict) -> str:
 
 @router.post("/api/chat")
 async def chat(req: ChatReq):
+    import conversations
+    users = [m.content for m in req.messages if m.role == "user"]
+    if not users:
+        raise HTTPException(400, "no user message")
+    ask_req = AskReq(q=users[-1], device=req.device)
+    history = [m.model_dump() for m in req.messages]
+    previous = conversations.get(req.conversation_id) if req.conversation_id else None
+    if previous:
+        for i, message in enumerate(history):
+            saved = previous["messages"][i] if i < len(previous["messages"]) else {}
+            if saved.get("role") == message["role"] and saved.get("content") == message["content"]:
+                history[i] = {**saved, **message}
+    cid = conversations.save(history, req.conversation_id)
+
+    def remember(result):
+        conversations.save(history + [{"role": "assistant", "content": result["answer"],
+                                      "sources": result.get("sources", []),
+                                      "cited": result.get("cited", []), "ms": result.get("ms", 0)}], cid)
+        return {**result, "conversation_id": cid, "conversation_updated_at": conversations.get(cid)["ts"]}
+
     if not req.stream:
-        res = {}
+        result = {"sources": []}
         try:
-            async for ev in _agent(req):
-                if ev["type"] == "sources":
-                    res["sources"] = ev["items"]
-                elif ev["type"] == "done":
-                    res.update(answer=ev["answer"], cited=ev["cited"], ms=ev["ms"])
+            async for event in _agent(req):
+                if event["type"] == "sources":
+                    result["sources"] = event["items"]
+                elif event["type"] == "done":
+                    result.update(answer=event["answer"], cited=event["cited"], ms=event["ms"])
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(500, repr(e))
-        return res
+        return remember(result)
 
     agent = _agent(req)
     try:  # surface a bad request as HTTP 400 before the stream starts
@@ -492,12 +513,25 @@ async def chat(req: ChatReq):
         first = {"type": "error", "text": repr(e)}
 
     async def gen():
-        if first is not None:
-            yield _sse(first)
-            if first["type"] == "error":
-                return
         try:
+            sources = first["items"] if first and first["type"] == "sources" else []
+            if first and first["type"] == "done":
+                done = remember({"answer": first["answer"], "cited": first["cited"],
+                                 "ms": first["ms"], "sources": sources})
+                first.update(conversation_id=cid,
+                             conversation_updated_at=done["conversation_updated_at"])
+            if first is not None:
+                yield _sse(first)
+                if first["type"] == "error":
+                    return
             async for ev in agent:
+                if ev["type"] == "sources":
+                    sources = ev["items"]
+                elif ev["type"] == "done":
+                    done = remember({"answer": ev["answer"], "cited": ev["cited"],
+                                     "ms": ev["ms"], "sources": sources})
+                    ev.update(conversation_id=cid,
+                              conversation_updated_at=done["conversation_updated_at"])
                 yield _sse(ev)
                 if ev["type"] == "token":
                     await asyncio.sleep(0.01)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ctypes
 import sys
 import tempfile
 import threading
@@ -46,6 +47,72 @@ class FakeWinCall:
 
 
 class QuickChatTests(unittest.TestCase):
+    def test_service_selection_skips_backends_without_shared_history(self):
+        old_port, old_base = dockt_desktop.PORT, dockt_desktop.BASE
+        try:
+            with patch.dict(dockt_desktop.os.environ, {}, clear=True), \
+                 patch.object(dockt_desktop, "answers", side_effect=lambda url, **kw:
+                              url.endswith("/api/stats") or url == "http://127.0.0.1:8002/api/conversations"), \
+                 patch.object(dockt_desktop, "port_free",
+                              side_effect=lambda p: p not in (8000, 8001, 8002)) as free:
+                dockt_desktop.resolve_port()
+                self.assertEqual(dockt_desktop.PORT, 8002)
+                self.assertEqual(dockt_desktop.os.environ["DOCKT_URL"], "http://127.0.0.1:8002")
+                self.assertEqual(free.call_count, 3)
+        finally:
+            dockt_desktop.PORT, dockt_desktop.BASE = old_port, old_base
+
+    def test_port_resolution_checks_only_listening_ports_and_uses_first_free(self):
+        old_port, old_base = dockt_desktop.PORT, dockt_desktop.BASE
+        try:
+            with patch.dict(dockt_desktop.os.environ, {}, clear=True), \
+                 patch.object(dockt_desktop, "port_free", side_effect=lambda p: p not in (8000, 8001)), \
+                 patch.object(dockt_desktop, "answers", return_value=False) as answers:
+                dockt_desktop.resolve_port()
+                self.assertEqual(dockt_desktop.PORT, 8002)
+                self.assertEqual(answers.call_count, 2)  # the one occupied port gets two API checks
+        finally:
+            dockt_desktop.PORT, dockt_desktop.BASE = old_port, old_base
+
+    def test_dashboard_is_temporarily_raised_when_opened(self):
+        window = Mock()
+        dockt_desktop.show(window, "")
+        window.restore.assert_called_once_with()
+        window.show.assert_called_once_with()
+        self.assertTrue(window.on_top)
+
+    def test_dashboard_still_opens_when_platform_has_no_on_top_support(self):
+        class Window:
+            def restore(self): pass
+            def show(self): self.was_shown = True
+            def evaluate_js(self, _script): pass
+            @property
+            def on_top(self): return False
+            @on_top.setter
+            def on_top(self, _value): raise NotImplementedError("unsupported here")
+        window = Window()
+        dockt_desktop.show(window, "")
+        self.assertTrue(window.was_shown)
+
+    def test_desktop_lock_rejects_a_second_process_and_releases_on_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "desktop.lock"
+            self.assertTrue(dockt_desktop.acquire_single_instance_lock(lock_path))
+            script = ("import sys; from pathlib import Path; "
+                      "sys.path.insert(0, sys.argv[1]); "
+                      "from desktop.dockt_desktop import acquire_single_instance_lock; "
+                      "print(acquire_single_instance_lock(Path(sys.argv[2])))")
+            result = quickchat.subprocess.run(
+                [sys.executable, "-c", script, str(ROOT), str(lock_path)],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.stdout.strip(), "False")
+            dockt_desktop._instance_lock_handle.close()
+            dockt_desktop._instance_lock_handle = None
+            result = quickchat.subprocess.run(
+                [sys.executable, "-c", script, str(ROOT), str(lock_path)],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.stdout.strip(), "True")
+
     def test_capture_toggle_creates_and_removes_the_shared_pause_file(self):
         with tempfile.TemporaryDirectory() as directory:
             pause_file = Path(directory) / ".dockt_pause"
@@ -135,6 +202,8 @@ class QuickChatTests(unittest.TestCase):
         app.placeholder_visible = False
         app.latest_question = ""
         app.status = Mock()
+        app.ask_button = Mock()
+        app.retry_button = Mock()
         app.messages = []
         app._render = Mock()
         app._resize_composer = Mock()
@@ -146,7 +215,71 @@ class QuickChatTests(unittest.TestCase):
         self.assertEqual(result, "break")
         self.assertEqual(app.latest_question, "first line\nsecond line")
         app.entry.delete.assert_called_once_with("1.0", "end")
+        app.retry_button.grid_remove.assert_called_once_with()
         app._resize_composer.assert_called_once_with()
+        thread.start.assert_called_once_with()
+
+    def test_failed_question_stays_in_history_without_repopulating_composer(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app.events = __import__("queue").Queue()
+        app.events.put(("error", "service unavailable"))
+        app.busy = True
+        app.ask_button = Mock()
+        app.retry_button = Mock()
+        app.retry_payload = None
+        app.messages = []
+        app.latest_question = "hiii"
+        app.status = Mock()
+        app.entry = Mock()
+        app.entry.get.return_value = ""
+        app._render = Mock()
+        app.root = Mock()
+        app.root.after = Mock()
+        app.events.put(("stop", None))
+        # Drain one event only; queue.Empty ends the handler after its event.
+        with patch.object(app.events, "get_nowait", side_effect=[
+                ("error", "service unavailable"), __import__("queue").Empty]):
+            app._drain_events()
+        app.entry.insert.assert_not_called()
+        app.retry_button.grid.assert_called_once_with()
+        expected = [{"role": "user", "content": "hiii"}]
+        self.assertEqual(app.messages, expected)
+        self.assertEqual(app.retry_payload, expected)
+        app._render.assert_called_once_with(
+            expected, "I couldn't reach Dockt. Check that it is running and try again.")
+
+    def test_retry_success_does_not_duplicate_question_already_in_history(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app.events = __import__("queue").Queue()
+        app.events.put(("answer", ("hiii", "hello", {"answer":"hello", "sources":[], "cited":[], "ms":4})))
+        app.history_ts = 0
+        app.messages = [{"role":"user", "content":"hiii"}]
+        app.busy = True
+        app.ask_button = Mock()
+        app.retry_button = Mock()
+        app.retry_payload = [{"role":"user", "content":"hiii"}]
+        app.status = Mock()
+        app._render = Mock()
+        app._clear_thumbnails = Mock()
+        app.root = Mock()
+        app.root.after = Mock()
+        with patch.object(app.events, "get_nowait", side_effect=[
+                ("answer", ("hiii", "hello", {"answer":"hello", "sources":[], "cited":[], "ms":4})),
+                __import__("queue").Empty]):
+            app._drain_events()
+        self.assertEqual([m["role"] for m in app.messages], ["user", "assistant"])
+
+    def test_retry_resends_the_same_question_without_adding_a_duplicate(self):
+        app = quickchat.QuickChat.__new__(quickchat.QuickChat)
+        app.busy = False
+        app.retry_payload = [{"role": "user", "content": "hiii"}]
+        app.ask_button = Mock()
+        app.retry_button = Mock()
+        app.status = Mock()
+        thread = Mock()
+        with patch.object(quickchat.threading, "Thread", return_value=thread) as factory:
+            self.assertEqual(app.retry_latest(), "break")
+        self.assertEqual(factory.call_args.kwargs["args"][1], app.retry_payload)
         thread.start.assert_called_once_with()
 
     def test_placeholder_is_not_submitted_as_a_user_question(self):
@@ -177,9 +310,10 @@ class QuickChatTests(unittest.TestCase):
     def test_composer_grows_to_five_lines_without_expanding_forever(self):
         app = quickchat.QuickChat.__new__(quickchat.QuickChat)
         app.entry = Mock()
-        app.entry.count.return_value = (8,)
+        app.entry._textbox = Mock()
+        app.entry._textbox.count.return_value = (8,)
         app._resize_composer()
-        app.entry.configure.assert_called_once_with(height=5)
+        app.entry.configure.assert_called_once_with(height=128)
 
     def test_paste_or_other_programmatic_edits_resize_the_composer(self):
         app = quickchat.QuickChat.__new__(quickchat.QuickChat)
@@ -222,7 +356,7 @@ class QuickChatTests(unittest.TestCase):
         app.entry = Mock()
         with patch.object(quickchat.os, "name", "posix"):
             app._focus_entry(move_cursor=False)
-        app.entry.focus_set.assert_called_once_with()
+        app.entry.focus_force.assert_called_once_with()
         app.entry.mark_set.assert_not_called()
 
     def test_open_in_dockt_hands_off_to_existing_desktop_window(self):
@@ -330,6 +464,13 @@ class QuickChatTests(unittest.TestCase):
         self.assertEqual(quickchat.PALETTES["light"]["text"], "#1F1E1D")
         self.assertEqual(quickchat.PALETTES["dark"]["bg"], "#262624")
         self.assertEqual(quickchat.PALETTES["dark"]["accent_text"], "#A3E635")
+
+    def test_windows_dpi_awareness_prefers_per_monitor_v2(self):
+        user32 = Mock()
+        user32.SetProcessDpiAwarenessContext.return_value = 1
+        self.assertTrue(quickchat._enable_windows_dpi_awareness(user32=user32))
+        context = user32.SetProcessDpiAwarenessContext.call_args.args[0]
+        self.assertEqual(context.value, ctypes.c_void_p(-4).value)
 
 
 if __name__ == "__main__":

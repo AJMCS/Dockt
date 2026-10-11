@@ -436,7 +436,8 @@ function handleEvent(turn, ev) {
     case "done":
       renderFinal(turn, ev);
       messages.push({role: "assistant", content: ev.answer, sources: slim(turn.sources), cited: ev.cited || [], ms: ev.ms});
-      saveChat();
+      chatId = ev.conversation_id || chatId;
+      refreshChats();
       break;
     case "error":    // ev.text can be a raw exception: never show it
       turn.body.innerHTML = `<span class="hint">Couldn't get an answer just now. Check that the GX10 is reachable and try again.</span>`;
@@ -447,6 +448,7 @@ function handleEvent(turn, ev) {
 }
 
 async function sendChat(q) {
+  chatId ??= crypto.randomUUID();
   messages.push({role: "user", content: q});
   bubble("user", esc(q));
   const msg = bubble("bot", `<span class="hint"><span class="spin"></span> Thinking…</span>`);
@@ -460,7 +462,7 @@ async function sendChat(q) {
   try {
     const r = await fetch("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"},
                           body: JSON.stringify({messages: messages.map(({role, content}) => ({role, content})), stream: true,
-                                               device: $("#dev").value || null})});
+                                               device: $("#dev").value || null, conversation_id: chatId})});
     if (!r.ok) throw new Error("HTTP " + r.status);
     const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
@@ -486,7 +488,7 @@ async function sendChat(q) {
 
 function newChat() {
   if (busy) return;
-  messages = []; chatId = null;
+  messages = []; chatId = null; chatTs = 0;
   $("#thread").innerHTML = WELCOME;
   showSources([]); tlSel = null; refreshTimeline(); renderChatList(); closeSidebar();
   $("#q").focus();
@@ -496,21 +498,53 @@ const closeSidebar = () => document.body.classList.remove("sb-open");
 $("#menuBtn").onclick = () => document.body.classList.toggle("sb-open");
 $("#scrim").onclick = closeSidebar;
 
-// ---------- recent chats (this browser's localStorage only: stays on the laptop) ----------
-const CHATS_KEY = "dockt-chats", MAX_CHATS = 30;
+// ---------- shared laptop history: dashboard and pet use the same local SQLite store ----------
+const CHATS_KEY = "dockt-chats";
 let chatId = null;   // id of the open conversation once it has been saved
-function loadChats() { try { return JSON.parse(localStorage.getItem(CHATS_KEY)) || []; } catch { return []; } }
-function storeChats(chats) { try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, MAX_CHATS))); } catch {} }
-function saveChat() {
+let chatTs = 0, chatCache = [], refreshingChats = false;
+const loadChats = () => chatCache;
+async function saveChat() {
   if (!messages.length) return;
-  chatId ??= Date.now();
-  const title = (messages.find(m => m.role === "user")?.content || "Chat").slice(0, 80);
-  storeChats([{id: chatId, title, ts: Date.now(), messages}, ...loadChats().filter(c => c.id !== chatId)]);
-  renderChatList();
+  chatId ??= crypto.randomUUID();
+  try {
+    await api(`/api/conversations/${encodeURIComponent(chatId)}`, {method: "PUT",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({messages})});
+    await refreshChats();
+  } catch (e) { console.warn("Couldn't save chat:", e); }
+}
+async function refreshChats() {
+  if (refreshingChats) return;
+  refreshingChats = true;
+  try {
+    chatCache = await api("/api/conversations");
+    const current = chatCache.find(c => c.id === chatId);
+    if (current && !busy && current.ts > chatTs) {
+      chatTs = current.ts;
+      messages = current.messages;
+      renderConversation();
+    }
+    renderChatList();
+  } catch (e) { console.warn("Couldn't sync chats:", e); }
+  finally { refreshingChats = false; }
+}
+async function migrateLocalChats() {
+  try {
+    const legacy = JSON.parse(localStorage.getItem(CHATS_KEY) || "[]");
+    for (const c of legacy) {
+      const id = "legacy-" + c.id;
+      // Check first so migration is safe to repeat after an interrupted startup.
+      const known = await api("/api/conversations");
+      if (!known.some(row => row.id === id))
+        await api(`/api/conversations/${encodeURIComponent(id)}`, {method: "PUT",
+          headers: {"Content-Type": "application/json"}, body: JSON.stringify({messages: c.messages})});
+    }
+    localStorage.removeItem(CHATS_KEY);
+  } catch (e) { console.warn("Local chat migration will retry on next launch:", e); }
+  await refreshChats();
 }
 function renderChatList() {
   const chats = loadChats();
-  $("#chatList").innerHTML = !chats.length ? `<li class="none">No chats yet.</li>` : chats.map(c => `<li class="${c.id === chatId ? "on" : ""}" data-id="${c.id}" title="${esc(c.title)}">
+  $("#chatList").innerHTML = !chats.length ? `<li class="none">No chats yet.</li>` : chats.map(c => `<li class="${c.id === chatId ? "on" : ""}" data-id="${esc(c.id)}" title="${esc(c.title)}">
       <span class="ctitle">${esc(c.title)}</span>
       <button class="del" title="Delete" aria-label="Delete this chat">×</button></li>`).join("");
 }
@@ -527,19 +561,23 @@ function renderConversation() {
   }
   scrollThread();
 }
-$("#chatList").addEventListener("click", e => {
+$("#chatList").addEventListener("click", async e => {
   const li = e.target.closest("li[data-id]"); if (!li || busy) return;
-  const id = +li.dataset.id;
+  const id = li.dataset.id;
   if (e.target.closest(".del")) {
-    storeChats(loadChats().filter(c => c.id !== id));
+    await api(`/api/conversations/${encodeURIComponent(id)}`, {method: "DELETE"});
+    chatCache = chatCache.filter(c => c.id !== id);
     return id === chatId ? newChat() : renderChatList();
   }
   const c = loadChats().find(c => c.id === id); if (!c) return;
-  chatId = id; messages = c.messages;
+  chatId = id; chatTs = c.ts; messages = c.messages;
   renderConversation(); renderChatList(); closeSidebar();
   $("#q").focus();
 });
 renderChatList();
+migrateLocalChats();
+setInterval(refreshChats, 3000);
+window.addEventListener("focus", refreshChats);
 $("#thread").addEventListener("click", e => { const c = e.target.closest(".cite"); if (c) openModal(+c.dataset.id); });
 $("#sources").addEventListener("click", e => { const c = e.target.closest(".card"); if (c) openModal(+c.dataset.id); });
 $("#thread").innerHTML = WELCOME;
@@ -640,10 +678,18 @@ $("#modal").addEventListener("click", e => { if (e.target.id === "modal") $("#mo
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("#modal").style.display = "none"; });
 
 // ---------- deep links (Lane 1 opens these) ----------
-function route() {
+async function route() {
   const h = location.hash;
   let m;
   if ((m = h.match(/^#\/capture\/(\d+)/))) openModal(+m[1]);
+  else if ((m = h.match(/^#\/conversation\/([^/?]+)/))) {
+    try {
+      const c = await api(`/api/conversations/${encodeURIComponent(decodeURIComponent(m[1]))}`);
+      if (busy) return;
+      chatId = c.id; chatTs = c.ts; messages = c.messages;
+      renderConversation(); await refreshChats(); closeSidebar(); $("#q").focus();
+    } catch (e) { console.warn("Couldn't open the saved conversation:", e); }
+  }
   else if ((m = h.match(/^#\/chat\?(.*)$/))) {
     const q = new URLSearchParams(m[1]).get("q")?.trim();
     if (q) busy ? ($("#q").value = q) : sendChat(q);

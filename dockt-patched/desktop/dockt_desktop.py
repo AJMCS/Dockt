@@ -21,8 +21,8 @@ and stops whatever services this process started. A service started elsewhere is
 
 Only one window runs. A second launch, or `--open`, hands its link to the running window
 through http://127.0.0.1:8765/open?hash=<#/...> (Lane 1's tray and quick-chat can call
-that URL directly). Logs: ~/.dockt/logs/. Chat history and theme persist in
-~/.dockt/webview (the window's own browser profile).
+that URL directly). Logs: ~/.dockt/logs/. Shared chat history lives in the local
+data directory's conversations.db; the theme persists in ~/.dockt/webview.
 """
 import argparse
 import atexit
@@ -50,6 +50,8 @@ ICON = Path(__file__).with_name("dockt.ico")
 children: list[subprocess.Popen] = []
 shutdown_requested = threading.Event()
 stopping = threading.Event()   # set by stop_children so the tunnel watchdog doesn't reconnect
+_instance_lock_handle = None
+pending_hash = ""
 
 
 # ---------- helpers ----------
@@ -66,7 +68,7 @@ def clean_hash(h: str | None) -> str:
     h = (h or "").strip().lstrip("/")
     if h.startswith("#"):
         h = h[1:].lstrip("/")
-    return "#/" + h if h.startswith(("capture/", "chat?")) else ""
+    return "#/" + h if h.startswith(("capture/", "chat?", "conversation/")) else ""
 
 
 def dashboard_window_options(h: str) -> dict:
@@ -103,8 +105,18 @@ def resolve_port():
     global PORT, BASE
     if "DOCKT_PORT" not in os.environ:
         ports = range(8000, 8100)
-        running = next((p for p in ports if answers(f"http://127.0.0.1:{p}/api/stats", timeout=0.3)), None)
-        PORT = running or next((p for p in ports if port_free(p)), 8000)
+        running, first_free = None, None
+        for p in ports:
+            if port_free(p):
+                if first_free is None:
+                    first_free = p
+                continue
+            # Only make HTTP requests to ports that actually have a listener.
+            if answers(f"http://127.0.0.1:{p}/api/stats", timeout=0.18) and \
+                    answers(f"http://127.0.0.1:{p}/api/conversations", timeout=0.18):
+                running = p
+                break
+        PORT = running or first_free or 8000
         BASE = f"http://127.0.0.1:{PORT}"
     os.environ["DOCKT_PORT"], os.environ["DOCKT_URL"] = str(PORT), BASE
 
@@ -255,15 +267,31 @@ class Control(BaseHTTPRequestHandler):
 
 
 def show(window, h: str):
+    global pending_hash
+    pending_hash = h
     if window is None:
         return
     try:
         window.restore()
+    except Exception:
+        pass
+    # Windows can restore a hidden WebView behind the foreground application.
+    # Keep the show operation independent so unsupported topmost settings on macOS
+    # never prevent the dashboard from opening.
+    try:
+        window.on_top = True
+        threading.Timer(1.2, lambda: setattr(window, "on_top", False)).start()
+    except Exception:
+        pass
+    try:
         window.show()
     except Exception:
         pass
     if h:   # the dashboard routes on hashchange (index.html, "deep links")
-        window.evaluate_js(f"location.hash = {json.dumps(h)}")
+        try:
+            window.evaluate_js(f"location.hash = {json.dumps(h)}")
+        except Exception:
+            pass
 
 
 def hide_dashboard_on_close(window) -> bool:
@@ -278,10 +306,35 @@ def hand_off(h: str) -> bool:
     """If a window is already running, give it the link and return True."""
     try:
         q = urllib.parse.urlencode({"hash": h})
-        with urllib.request.urlopen(f"http://127.0.0.1:{CONTROL_PORT}/open?{q}", timeout=2) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{CONTROL_PORT}/open?{q}", timeout=0.35) as r:
             return r.status == 200
     except Exception:
         return False
+
+
+def acquire_single_instance_lock(path: Path | None = None) -> bool:
+    """Claim one desktop session before importing WebView or starting child services."""
+    global _instance_lock_handle
+    lock_path = path or (HOME / "desktop.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(lock_path, "a+b")
+    lock.seek(0, os.SEEK_END)
+    if lock.tell() == 0:
+        lock.write(b"\0")
+        lock.flush()
+    lock.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        lock.close()
+        return False
+    _instance_lock_handle = lock
+    return True
 
 
 LOADING = """<!doctype html><meta charset="utf-8"><style>
@@ -309,8 +362,7 @@ def boot(window, h: str, server: subprocess.Popen | None):
                 "__TEXT__", f"Dockt couldn't start. Details are in {LOGS / 'server.log'}"))
             return
         time.sleep(0.4)
-    start_quickchat()
-    window.load_url(BASE + "/" + h)
+    window.load_url(BASE + "/" + (pending_hash or h))
 
 
 def main():
@@ -323,38 +375,51 @@ def main():
 
     if hand_off(h):   # already running: it shows the link, we're done
         return
+    if not acquire_single_instance_lock():
+        # A second launch may race the first one's early startup; wait for its
+        # control endpoint to bind before deciding it is already running.
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            if hand_off(h):
+                return
+            time.sleep(0.12)
+        return
+
     try:
         control = ThreadingHTTPServer(("127.0.0.1", CONTROL_PORT), Control)
     except OSError:
         control = None   # port taken by something else: run anyway, just without hand-off
+    if control:
+        threading.Thread(target=control.serve_forever, daemon=True).start()
 
     resolve_port()
-    import webview   # pywebview; imported late so --open hand-offs stay instant
+    make_icon()
+    # The pet has its own local window and can appear while WebView/server imports warm up.
+    start_quickchat()
+    # The backend may wait for an SSH tunnel; start it after the pet is already visible.
+    server = start_backend(args.mock, not args.no_capture)
+    atexit.register(stop_children)
+    import webview
     if os.name == "nt":   # own taskbar group and icon instead of Python's
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Dockt.Desktop")
         except Exception:
             pass
-    make_icon()
-
-    server = start_backend(args.mock, not args.no_capture)
-    atexit.register(stop_children)
-
     window = webview.create_window(
         "Dockt", html=LOADING.replace("__TEXT__", "Starting Dockt on this laptop…"),
         **dashboard_window_options(h))
     window.events.closing += lambda: hide_dashboard_on_close(window)
-    if control:
-        Control.window = window
-        threading.Thread(target=control.serve_forever, daemon=True).start()
+    Control.window = window
     try:
-        # private_mode=False + a storage path: recent chats and the theme survive restarts
+        # Persist the browser profile for theme preferences and legacy chat migration.
         webview.start(boot, (window, h, server), private_mode=False, storage_path=str(HOME / "webview"),
                       icon=str(ICON) if ICON.exists() else None)
     finally:
         if control:
             control.shutdown()
+            control.server_close()
+        Control.window = None
         stop_children()
 
 

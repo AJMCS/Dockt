@@ -10,8 +10,17 @@ Run `start-dockt.bat` from the `dockt-patched` folder. It starts local capture a
 
 - **First run** creates `.venv` and installs `requirements-server.txt`, `requirements-agent.txt` and `requirements-desktop.txt`. You need Python 3.11+. The window uses WebView2, which ships with Windows 10/11.
 - **Desktop shortcut** with the Dockt icon: `powershell -ExecutionPolicy Bypass -File desktop\install-shortcut.ps1`.
-- **Port:** the service uses the first free port from 8000 to 8099. **Logs:** `~\.dockt\logs\`. **Screenshots + index:** `~\.dockt\data\` (`DATA_DIR`). **Chat history + theme:** `~\.dockt\webview\`.
+- **Port:** the service uses the first free port from 8000 to 8099. **Logs:** `~\.dockt\logs\`. **Screenshots + index:** `~\.dockt\data\` (`DATA_DIR`). **Chat history:** `~\.dockt\data\conversations.db`. **Theme:** `~\.dockt\webview\`.
 - **Opening a specific screenshot or question** from another program: `GET http://127.0.0.1:8765/open?hash=%23%2Fcapture%2F9` (or `#/chat?q=...`). The quick-chat uses this.
+
+Pet chat and dashboard history share the local `conversations.db` store. **Open in Dockt** opens the saved conversation without submitting it again. Both views refresh shared history while idle. Existing browser history migrates on startup; questions are saved even when the model fails. The quick chat uses rounded, DPI-aware CustomTkinter controls. The desktop launcher locks to one Dockt session and starts the pet while the dashboard service initializes.
+
+Run the regression and local API smoke tests from this folder with:
+
+```powershell
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --test tests/test_dashboard_history.cjs
+```
 
 ## The GX10 (models only)
 

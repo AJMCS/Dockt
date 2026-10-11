@@ -1,3 +1,4 @@
 # Dockt desktop window (desktop/dockt_desktop.py). On Windows this also installs pythonnet
 # and renders with WebView2, which ships with Windows 10/11.
 pywebview>=5.0
+customtkinter>=5.2,<7
