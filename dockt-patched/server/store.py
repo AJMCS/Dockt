@@ -231,9 +231,13 @@ class Store:
                 "UPDATE captures SET extracted=2 WHERE status='done' AND extracted=0 AND EXISTS ("
                 "SELECT 1 FROM captures n WHERE n.device = captures.device AND n.ts > captures.ts "
                 "AND n.ts < captures.ts + ?)", (settle_s,))
+            # indexing runs newest-first, so also wait until every earlier frame of the same app on this device
+            # is indexed: otherwise a retraction can be read before the request it retracts
             rows = self.db.execute(
                 "SELECT id, device, ts, app, title, summary, ocr FROM captures "
-                "WHERE status='done' AND extracted=0 AND ts <= ? ORDER BY ts ASC LIMIT ?",
+                "WHERE status='done' AND extracted=0 AND ts <= ? AND NOT EXISTS ("
+                "SELECT 1 FROM captures p WHERE p.device = captures.device AND p.app = captures.app "
+                "AND p.ts < captures.ts AND p.status IN ('pending', 'processing')) ORDER BY ts ASC LIMIT ?",
                 (time.time() - settle_s, n)).fetchall()
             if rows:
                 self.db.executemany("UPDATE captures SET extracted=1 WHERE id=?",

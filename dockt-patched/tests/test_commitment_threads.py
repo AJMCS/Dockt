@@ -126,8 +126,10 @@ def data_dir(tmp_path):
 
 
 def test_retraction_and_draft_on_a_fresh_database(data_dir):
+    """Slow, one-at-a-time vision like the real GX10: frames finish indexing newest-first, so the retraction is
+    indexed before the request; extraction must still read the thread in order."""
     data_dir.mkdir()
-    stack = Stack(data_dir)
+    stack = Stack(data_dir, MOCK_VLM_DELAY=0.4, INGEST_CONCURRENCY=1)
     try:
         check_scenarios(stack)
         stack.replay("--scenario", "all", "--name", "laptop")   # the same frames again: still no duplicates

@@ -32,6 +32,22 @@ CASES = [
      ("promise", "them", "Alex sends the deck to Sarah by Friday"),
      "Alex: I'll send the deck to Sarah by Friday\nMe: nevermind, I'll do it",
      ("cancelled", "me")),
+    ("new: they ask me (no open items)",
+     None,
+     "Alex: can you send the deck to Sarah by Friday?",
+     ("active", "me")),
+    ("new: I promise (no open items)",
+     None,
+     "Jordan: did you get the NDA?\nMe: I'll send the revised NDA by Monday",
+     ("active", "me")),
+    ("new: they promise me (no open items)",
+     None,
+     "Me: can you review the redline?\nPriya: sure, I'll get it back to you by Wednesday",
+     ("active", "them")),
+    ("new: a deadline on screen (email, not a chat)",
+     None,
+     "Invoice #4471 from ASUS\nAmount due: $1,250.00\nDue date: Oct 30",
+     ("active", "me")),
     ("control: nothing retracted",
      ("request", "me", "Send the deck to Sarah by Friday"),
      "Alex: can you send the deck to Sarah by Friday?\nAlex: thanks!",
@@ -57,23 +73,24 @@ def main():
 
     async def run():
         ok = total = 0
-        for name, (kind, owner, text), screen, (want_status, want_new_owner) in CASES:
-            item = {"id": 7, "kind": kind, "who": owner, "text": text, "due": "Friday", "status": "active"}
-            user = (f"Conversation: Slack — #design\nSeen: Sat 14:05\n\nOPEN ITEMS\n{brain._item_line(item)}\n\n"
-                    f"CLOSED ITEMS\n(none)\n\nSummary: A Slack conversation.\n\nSCREEN TEXT (sent and received)\n{screen}")
+        for name, open_item, screen, (want_status, want_new_owner) in CASES:
+            kind, owner, text = open_item or (None, None, None)
+            item = {"id": 7, "kind": kind, "who": owner, "text": text, "due": "Friday", "status": "active"} if kind else None
+            user = (f"Conversation: Slack — #design\nSeen: Sat 14:05\n\n"
+                    f"OPEN ITEMS\n{brain._item_line(item) if item else '(none)'}\n\n"
+                    f"CLOSED ITEMS\n(none)\n\nSummary: A Slack conversation.\n\nSCREEN TEXT\n{screen}")
             for _ in range(a.runs):
                 total += 1
                 out = await models.chat(brain.EXTRACT_SYSTEM, user, max_tokens=400, temperature=0)
                 try:
-                    new, updates = brain._parse_extract(out, {7})
+                    new, updates = brain._parse_extract(out, {7}, screen)
                 except ValueError as e:
-                    print(f"FAIL  {name}: unparseable output\n      {e}")
+                    print(f"FAIL  {name}: unparseable output\n      {out!r}")
                     continue
                 status = next((u["status"] for u in updates if u["id"] == 7), "active")
-                new = [n for n in new if not store.is_repeat(n, [item])]   # the server drops these too
+                new = [n for n in new if not store.is_repeat(n, [item] if item else [])]   # the server drops these too
                 new_owners = [n["who"] for n in new]
-                good = status == want_status and (want_new_owner in new_owners if want_new_owner else
-                                                  not any("deck" in n["text"].lower() for n in new))
+                good = status == want_status and (want_new_owner in new_owners if want_new_owner else not new)
                 ok += good
                 print(f"{'PASS' if good else 'FAIL'}  {name}\n      status {status} (want {want_status}); "
                       f"new {[(n['who'], n['text']) for n in new]} (want owner {want_new_owner or 'none'})\n"

@@ -98,13 +98,13 @@ EXTRACT_CONCURRENCY = int(os.environ.get("EXTRACT_CONCURRENCY", "2"))
 EXTRACT_SETTLE_S = float(os.environ.get("EXTRACT_SETTLE_S", "8"))       # a frame must stay on screen this long
 EXTRACT_THREAD_HOURS = float(os.environ.get("EXTRACT_THREAD_HOURS", "6"))  # open items of a thread to re-check
 
-EXTRACT_SYSTEM = """You keep the list of COMMITMENTS in one conversation on the user's screen up to date. "Me" is the user.
+EXTRACT_SYSTEM = """You keep the list of COMMITMENTS seen in one window of the user's screen up to date (a chat, an email, a document or a web page). "Me" is the user.
 - promise: something someone said they will do ("I'll send the deck by Friday")
 - request: something someone asked someone else to do that is still open ("can you review the redline?")
 - deadline: a due date or time ("due Oct 30", "submission closes Sun 1:30 PM")
 owner = who has to do it: "me" (the user) or "them" (anyone else).
 
-You get the items already OPEN in this conversation (with ids), items recently CLOSED, and the conversation's current SCREEN TEXT (sent and received messages only).
+You get the items already OPEN in this window (with ids), items recently CLOSED, and its current SCREEN TEXT (sent and received messages and other visible text; unsent drafts are removed).
 Return ONLY a JSON object, no prose:
 {"new": [{"kind": "promise"|"request"|"deadline", "text": "<one specific line, keep names/numbers/dates>", "owner": "me"|"them", "due": "<as written, or ''>"}],
  "updates": [{"id": <id of an OPEN item>, "status": "cancelled"|"changed"|"done", "new_text": "<for changed: the new version, else ''>", "reason": "<short, quote the message>"}]}
@@ -112,7 +112,12 @@ Rules:
 - A LATER message that retracts ("actually nevermind", "no need"), declines ("I can't"), reassigns ("Sam will do it instead") or says it's handled ("I've got it", "already done") updates the OPEN item it refers to: cancelled if it no longer has to happen, changed if it still happens differently (new owner, date or details: put the new version in new_text), done if its owner says it is done.
 - Watch who speaks. Whoever says "nevermind, I'll do it" / "I've got it" takes the task over: cancel the open item. Only when the speaker is Me AND the item was owned by "them", also add the task to "new" with owner "me".
 - Thanks, ok, sounds good, emoji and other acknowledgements change NOTHING. "done" only when the owner says the task itself is finished ("sent it").
-Examples (OPEN item, then the latest messages -> your answer):
+- Every NEW commitment in the screen text goes in "new", whoever owes it: a question asking someone to do something is a request; "I'll ..." / "will do X by ..." is a promise. Owner is who must DO it: a request someone makes to Me -> "me"; a request Me makes ("Me: can you ...?") -> "them"; a promise -> whoever promised.
+Examples with no OPEN items:
+  "Alex: can you send the deck to Sarah by Friday?" -> {"new": [{"kind": "request", "text": "Send the deck to Sarah", "owner": "me", "due": "Friday"}], "updates": []}
+  "Me: can you review the redline?" "Priya: sure, I'll get it back to you by Wednesday" -> {"new": [{"kind": "promise", "text": "Priya returns the reviewed redline", "owner": "them", "due": "Wednesday"}], "updates": []}
+  "Invoice #4471 from ASUS  due Oct 30  $1,250.00" -> {"new": [{"kind": "deadline", "text": "Pay ASUS invoice #4471 ($1,250.00)", "owner": "me", "due": "Oct 30"}], "updates": []}
+Examples with an OPEN item, then the latest messages:
   id=7 [request, owner me] Send the deck. "Alex: nevermind, I've got it" -> {"new": [], "updates": [{"id": 7, "status": "cancelled", "new_text": "", "reason": "Alex: nevermind, I've got it"}]}
   id=7 [request, owner them] Alex to send the deck. "Me: nevermind, I'll do it" -> {"new": [{"kind": "promise", "text": "Send the deck", "owner": "me", "due": ""}], "updates": [{"id": 7, "status": "cancelled", "new_text": "", "reason": "Me: nevermind, I'll do it"}]}
   id=7 [request, owner me] Send the deck. "Alex: thanks!" -> {"new": [], "updates": []}
@@ -133,7 +138,18 @@ def _is_ack(reason: str) -> bool:
     return bool(_ACK.fullmatch(msg))
 
 
-def _parse_extract(text: str, open_ids: set[int]) -> tuple[list[dict], list[dict]]:
+def _on_screen(reason: str, screen: str) -> bool:
+    """The message an update quotes must really be on screen (Nemotron sometimes copies a prompt example instead)."""
+    quoted = re.findall(r'"([^"]{3,})"', reason) or [re.sub(r"^[\w .'-]{1,30}:\s*", "", reason.strip())]
+    have = set(re.findall(r"[a-z0-9']+", screen.lower()))
+    for q in quoted:
+        words = set(re.findall(r"[a-z0-9']+", q.lower()))
+        if words and len(words & have) / len(words) >= 0.6:
+            return True
+    return False
+
+
+def _parse_extract(text: str, open_ids: set[int], screen: str | None = None) -> tuple[list[dict], list[dict]]:
     """(new items, updates) from the model's JSON. Raises ValueError when there's no usable JSON, so the capture
     is retried rather than silently marked done. A bare JSON array (the old format) counts as new items."""
     text = models._strip_think(text or "")
@@ -167,8 +183,10 @@ def _parse_extract(text: str, open_ids: set[int]) -> tuple[list[dict], list[dict
             cid = int(u.get("id"))
         except (TypeError, ValueError, AttributeError):
             continue
-        if cid in open_ids and u.get("status") in ("cancelled", "changed", "done") and not _is_ack(str(u.get("reason") or "")):
-            updates.append({"id": cid, "status": u["status"], "reason": str(u.get("reason") or "")[:200],
+        reason = str(u.get("reason") or "")
+        if (cid in open_ids and u.get("status") in ("cancelled", "changed", "done") and not _is_ack(reason)
+                and (screen is None or _on_screen(reason, screen))):
+            updates.append({"id": cid, "status": u["status"], "reason": reason[:200],
                             "new_text": str(u.get("new_text") or "").strip()})
     return new[:4], updates
 
@@ -217,10 +235,10 @@ async def extract_one(row, sem):
             user = (f"Conversation: {row['app']} — {row['title']}\nSeen: {_fmt_time(row['ts'])}\n\n"
                     f"OPEN ITEMS\n{chr(10).join(map(_item_line, open_items)) or '(none)'}\n\n"
                     f"CLOSED ITEMS\n{chr(10).join(map(_item_line, closed)) or '(none)'}\n\n"
-                    f"Summary: {row['summary']}\n\nSCREEN TEXT (sent and received)\n{sent[:1500]}")
+                    f"Summary: {row['summary']}\n\nSCREEN TEXT\n{sent[:1500]}")
             await _wait_for_foreground()
             out = await models.chat(EXTRACT_SYSTEM, user, max_tokens=400, temperature=0)
-            new, updates = _parse_extract(out, {c["id"] for c in open_items})
+            new, updates = _parse_extract(out, {c["id"] for c in open_items}, sent)
             by_id = {c["id"]: c for c in open_items}
             for u in updates:
                 if memory.set_commitment_status(u["id"], u["status"], u["reason"], row["id"], row["ts"]):

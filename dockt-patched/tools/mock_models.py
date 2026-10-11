@@ -24,6 +24,7 @@ DIM = 384
 # MOCK_LLM_PARALLEL run at once (Ollama's OLLAMA_NUM_PARALLEL). Defaults: instant, unlimited.
 LLM_DELAY = float(os.environ.get("MOCK_LLM_DELAY", "0"))
 LLM_SLOTS = asyncio.Semaphore(int(os.environ.get("MOCK_LLM_PARALLEL", "1000")))
+VLM_DELAY = float(os.environ.get("MOCK_VLM_DELAY", "0"))   # slow vision: frames finish indexing newest-first
 CALLS = {"vision": 0, "extract": 0, "other": 0, "extract_inflight": 0}   # GET /mock/calls, for tests
 
 
@@ -61,7 +62,7 @@ def _mock_extract(prompt: str) -> str:
     open_items = [(int(i), t) for i, t in re.findall(r"^- id=(\d+) \[[^\]]*\] (.*)$", prompt.split("CLOSED ITEMS")[0], re.M)]
     known = [t for _, t in open_items] + re.findall(r"^- id=\d+ \[[^\]]*\] (.*?)(?: -> .*)?$",
                                                     prompt.split("CLOSED ITEMS")[1].split("SCREEN TEXT")[0], re.M)
-    screen = prompt.split("SCREEN TEXT (sent and received)", 1)[1]
+    screen = prompt.split("SCREEN TEXT", 1)[1].split("\n", 1)[-1]
     lines = [l.strip() for l in screen.splitlines() if l.strip()]
     new, updates = [], []
     retract = next((l for l in reversed(lines) if RETRACT.search(l)), None)
@@ -106,6 +107,8 @@ async def chat(req: Request):
     content = body["messages"][-1]["content"]
     kind = "vision" if isinstance(content, list) else "extract" if "OPEN ITEMS" in str(content) else "other"
     CALLS[kind] += 1
+    if VLM_DELAY and kind == "vision":
+        await asyncio.sleep(VLM_DELAY)
     if LLM_DELAY and kind != "vision":   # text model only
         CALLS["extract_inflight"] += kind == "extract"
         try:
